@@ -17,6 +17,8 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -28,6 +30,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 class ZonedBlockDevice;
+class ZoneFile;
 
 class Zone {
   ZonedBlockDevice *zbd_;
@@ -78,6 +81,8 @@ class ZonedBlockDevice {
   std::condition_variable zone_resources_;
   std::mutex zone_resources_mtx_; /* Protects active/open io zones */
 
+  FILE *zone_log_file_;
+
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
@@ -91,6 +96,8 @@ class ZonedBlockDevice {
   Zone *GetIOZone(uint64_t offset);
 
   Zone *AllocateZone(Env::WriteLifeTimeHint lifetime);
+  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file,
+                     Zone *before_zone);
   Zone *AllocateMetaZone();
 
   uint64_t GetFreeSpace();
@@ -107,6 +114,7 @@ class ZonedBlockDevice {
 
   uint32_t GetZoneSize() { return zone_sz_; }
   uint32_t GetNrZones() { return nr_zones_; }
+  FILE *GetZoneLogFile() { return zone_log_file_; }
   std::vector<Zone *> GetMetaZones() { return meta_zones; }
 
   void SetFinishTreshold(uint32_t threshold) { finish_threshold_ = threshold; }

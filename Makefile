@@ -14,6 +14,8 @@ ifeq ($(origin PYTHON), undefined)
 endif
 export PYTHON
 
+EXTRA_CFLAGS += '-g -pg'
+
 CLEAN_FILES = # deliberately empty, so we can append below.
 CFLAGS += ${EXTRA_CFLAGS}
 CXXFLAGS += ${EXTRA_CXXFLAGS}

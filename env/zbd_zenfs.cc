@@ -6,8 +6,6 @@
 
 #if !defined(ROCKSDB_LITE) && !defined(OS_WIN) && defined(LIBZBD)
 
-#include "zbd_zenfs.h"
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,12 +16,15 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "io_zenfs.h"
 #include "rocksdb/env.h"
+#include "zbd_zenfs.h"
 
 #define KB (1024)
 #define MB (1024 * KB)
@@ -165,6 +166,9 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
                                    std::shared_ptr<Logger> logger)
     : filename_("/dev/" + bdevname), logger_(logger) {
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
+  zone_log_file_ = fopen("zone_usage.log", "w");
+  assert(NULL != zone_log_file_);
+  fprintf(zone_log_file_, "%-8s%-8s%-8s%-45s%-10s%-10s\n", "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE");
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -349,6 +353,8 @@ ZonedBlockDevice::~ZonedBlockDevice() {
   zbd_close(read_f_);
   zbd_close(read_direct_f_);
   zbd_close(write_f_);
+
+  fclose(zone_log_file_);
 }
 
 #define LIFETIME_DIFF_NOT_GOOD (100)
@@ -405,6 +411,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   int new_zone = 0;
   Status s;
 
+  assert(NULL != zone_log_file_);
   io_zones_mtx.lock();
 
   /* Make sure we are below the zone open limit */
@@ -427,6 +434,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
       if (!s.ok()) {
         Debug(logger_, "Failed resetting zone !");
       }
+      fprintf(zone_log_file_, "%-8s%-8d%-8lu\n", "RESET", 0, z->GetZoneNr());
       continue;
     }
 
@@ -437,6 +445,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
       if (!s.ok()) {
         Debug(logger_, "Failed finishing zone");
       }
+      fprintf(zone_log_file_, "%-8s%-8d%-8lu\n","FINISH", 0, z->GetZoneNr());
       active_io_zones_--;
     }
 
@@ -500,6 +509,22 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   LogZoneStats();
 
   return allocated_zone;
+}
+
+Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file, Zone *before_zone) {
+  Zone *zone = NULL;
+
+  assert(NULL != zone_file);
+  assert(NULL != zone_log_file_);
+
+  zone = AllocateZone(lifetime);
+  if (!before_zone) {
+	  fprintf(zone_log_file_, "%-8s%-8d%-8lu%-45s%-10u%-10lu\n", "NEW", 0, zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize());
+  } else {
+	  fprintf(zone_log_file_, "%-8s%-8lu%-8lu%-45s%-10u%-10lu\n", "EXHAUST", before_zone->GetZoneNr(), zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize());
+  }
+
+  return zone;
 }
 
 std::string ZonedBlockDevice::GetFilename() { return filename_; }
