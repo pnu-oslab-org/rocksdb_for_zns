@@ -6,8 +6,6 @@
 
 #if !defined(ROCKSDB_LITE) && !defined(OS_WIN) && defined(LIBZBD)
 
-#include "io_zenfs.h"
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,10 +17,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "io_zenfs.h"
 #include "rocksdb/env.h"
 #include "util/coding.h"
 #include "zbd_zenfs.h"
@@ -42,6 +42,8 @@ void ZoneExtent::EncodeTo(std::string* output) {
   PutFixed64(output, start_);
   PutFixed32(output, length_);
 }
+
+ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_); }
 
 enum ZoneFileTag : uint32_t {
   kFileID = 1,
@@ -100,7 +102,7 @@ Status ZoneFile::DecodeFrom(Slice* input) {
           return Status::Corruption("ZoneFile", "Missing file size");
         break;
       case kExtent:
-        extent = new ZoneExtent(0, 0, nullptr);
+        extent = new ZoneExtent(0, 0, nullptr, this);
         GetLengthPrefixedSlice(input, &slice);
         s = extent->DecodeFrom(&slice);
         if (!s.ok()) {
@@ -134,7 +136,8 @@ Status ZoneFile::MergeUpdate(ZoneFile* update) {
     ZoneExtent* extent = update_extents[i];
     Zone* zone = extent->zone_;
     zone->used_capacity_ += extent->length_;
-    extents_.push_back(new ZoneExtent(extent->start_, extent->length_, zone));
+    extents_.push_back(
+        new ZoneExtent(extent->start_, extent->length_, zone, this));
   }
 
   MetadataSynced();
@@ -165,8 +168,21 @@ ZoneFile::~ZoneFile() {
   for (auto e = std::begin(extents_); e != std::end(extents_); ++e) {
     Zone* zone = (*e)->zone_;
 
+#ifdef ZONE_CUSTOM_DEBUG
+    if (zbd_->GetZoneLogFile()) {
+      long cap = zone->used_capacity_;
+      fprintf(zbd_->GetZoneLogFile(),
+              "%-10ld%-8s%-8s%-40s%-8u%-8lu%-12ld%-12u\n",
+              (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
+              "PEND", GetFilename().c_str(), GetWriteLifeTimeHint(),
+              zone->GetZoneNr(), cap, (*e)->length_);
+    }
+    fflush(zbd_->GetZoneLogFile());
+#endif
+
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
+
     delete *e;
   }
   CloseWR();
@@ -179,6 +195,17 @@ void ZoneFile::CloseWR() {
   }
 }
 
+uint64_t ZoneFile::GetOffset(ZoneExtent* target_extent) {
+  uint64_t file_offset = 0;
+  for (const auto extent : extents_) {
+    if (extent->start_ == target_extent->start_) {
+      return file_offset;
+    }
+    file_offset += extent->length_;
+  }
+  return std::numeric_limits<uint64_t>::max();
+}
+
 ZoneExtent* ZoneFile::GetExtent(uint64_t file_offset, uint64_t* dev_offset) {
   for (unsigned int i = 0; i < extents_.size(); i++) {
     if (file_offset < extents_[i]->length_) {
@@ -189,6 +216,15 @@ ZoneExtent* ZoneFile::GetExtent(uint64_t file_offset, uint64_t* dev_offset) {
     }
   }
   return NULL;
+}
+
+ZoneExtent* ZoneFile::GetExtent(uint64_t extent_start) {
+  for (const auto extent : extents_) {
+    if (extent->start_ == extent_start) {
+      return extent;
+    }
+  }
+  return nullptr;
 }
 
 IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
@@ -274,6 +310,29 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
+void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
+  auto remove_pos = find(extents_.begin(), extents_.end(), target);
+  auto top_pos = find(extents_.begin(), extents_.end(), top);
+
+  assert(remove_pos != extents_.end());
+  assert(top_pos != extents_.end());
+
+  std::vector<ZoneExtent*> temp_extents;
+  std::copy(top_pos + 1, extents_.end(), std::back_inserter(temp_extents));
+
+  for (auto it = top_pos + 1; it != extents_.end(); it++) {
+    ZoneExtent* extent = *it;
+    fileSize -= extent->length_;
+  }
+
+  extents_.erase(top_pos + 1, extents_.end());
+  extents_.insert(remove_pos + 1, temp_extents.begin(), temp_extents.end());
+  extents_.erase(remove_pos);
+
+  extent_start_ = extents_.back()->start_;
+  extent_filepos_ = fileSize;
+}
+
 void ZoneFile::PushExtent() {
   uint64_t length;
 
@@ -284,8 +343,16 @@ void ZoneFile::PushExtent() {
   length = fileSize - extent_filepos_;
   if (length == 0) return;
 
+  if (length > (active_zone_->wp_ - extent_start_)) {
+    fprintf(stderr,
+            "(push) {zone: %lu, length: %lu{fileSize: %lu, extent_filepos_: "
+            "%lu}, wp: %lu, "
+            "start: %lu\n",
+            active_zone_->GetZoneNr(), length, fileSize, extent_filepos_,
+            active_zone_->wp_, extent_start_);
+  }
   assert(length <= (active_zone_->wp_ - extent_start_));
-  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_));
+  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_, this));
 
   active_zone_->used_capacity_ += length;
   extent_start_ = active_zone_->wp_;
@@ -299,7 +366,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
   IOStatus s;
 
   if (active_zone_ == NULL) {
-    active_zone_ = zbd_->AllocateZone(lifetime_);
+    active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL);
     if (!active_zone_) {
       return IOStatus::NoSpace("Zone allocation failure\n");
     }
@@ -309,10 +376,14 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
 
   while (left) {
     if (active_zone_->capacity_ == 0) {
+      if (((fileSize - extent_filepos_) % zbd_->GetBlockSize()) != 0) {
+        fprintf(stderr, "%s: %lu %lu\n", filename_.c_str(), fileSize,
+                extent_filepos_);
+      }
       PushExtent();
 
       active_zone_->CloseWR();
-      active_zone_ = zbd_->AllocateZone(lifetime_);
+      active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_);
       if (!active_zone_) {
         return IOStatus::NoSpace("Zone allocation failure\n");
       }
@@ -323,8 +394,17 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
     wr_size = left;
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
+#ifdef ZONE_CUSTOM_DEBUG
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "WRITE",
+            (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(),
+            wr_size, fileSize);
+    fflush(zbd_->GetZoneLogFile());
+#endif
     s = active_zone_->Append((char*)data + offset, wr_size);
-    if (!s.ok()) return s;
+    if (!s.ok()) {
+      return s;
+    }
 
     fileSize += wr_size;
     left -= wr_size;

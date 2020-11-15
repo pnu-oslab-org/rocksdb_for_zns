@@ -6,8 +6,6 @@
 
 #if !defined(ROCKSDB_LITE) && defined(OS_LINUX) && defined(LIBZBD)
 
-#include "env/fs_zenfs.h"
-
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "env/fs_zenfs.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "util/crc32c.h"
 
@@ -336,6 +335,13 @@ IOStatus ZenFS::DeleteFile(std::string fname) {
     s = PersistRecord(record);
     if (s.ok()) {
       files_.erase(fname);
+#ifdef ZONE_CUSTOM_DEBUG
+      if (zbd_->GetZoneLogFile()) {
+        fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8d%-45s\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "DEL", 0,
+                0, fname.c_str());
+      }
+#endif
       delete (zoneFile);
     }
   }
@@ -896,6 +902,8 @@ Status NewZenFS(FileSystem** fs, const std::string& bdevname) {
     delete zenFS;
     return s;
   }
+
+  zbd->files_mtx_ = &zenFS->files_mtx_;
 
   *fs = zenFS;
   return Status::OK();

@@ -7,13 +7,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include "db/builder.h"
-
 #include <algorithm>
 #include <deque>
 #include <vector>
 
 #include "db/blob/blob_file_builder.h"
+#include "db/builder.h"
 #include "db/compaction/compaction_iterator.h"
 #include "db/dbformat.h"
 #include "db/event_helpers.h"
@@ -148,6 +147,7 @@ Status BuildTable(
             file_checksum, file_checksum_func_name);
         return s;
       }
+      file->SetLevel(level);
       file->SetIOPriority(io_priority);
       file->SetWriteLifeTimeHint(write_hint);
 
@@ -241,7 +241,8 @@ Status BuildTable(
       meta->fd.file_size = file_size;
       meta->marked_for_compaction = builder->NeedCompact();
       assert(meta->fd.GetFileSize() > 0);
-      tp = builder->GetTableProperties(); // refresh now that builder is finished
+      tp = builder
+               ->GetTableProperties();  // refresh now that builder is finished
       if (table_properties) {
         *table_properties = tp;
       }
