@@ -21,12 +21,12 @@ echo "TARGET_FZ_BASE=$TARGET_FZ_BASE bytes"
 echo "TARGET_FILE_SIZE_MULTIPLIER=$TARGET_FILE_SIZE_MULTIPLIER"
 echo "MAX_BYTES_FOR_LEVEL_BASE=$MAX_BYTES_FOR_LEVEL_BASE bytes"
 
-NR_KEYS=100000
+NR_KEYS=5000000
 
 echo deadline > /sys/class/block/$DEV/queue/scheduler
 
 ./zenfs mkfs --zbd=$DEV --aux_path=/tmp/zenfs_$DEV --finish_threshold=$FUZZ --force
-uftrace record -a --force ./db_bench \
+./db_bench \
     --fs_uri=zenfs://dev:$DEV \
     --key_size=16 \
     --value_size=800 \

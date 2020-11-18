@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <utility>
