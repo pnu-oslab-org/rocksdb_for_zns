@@ -324,7 +324,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
     s = active_zone_->Append((char*)data + offset, wr_size);
-    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "WRITE", (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(), wr_size, fileSize);
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "WRITE", (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(), wr_size, fileSize, GetLevel());
     if (!s.ok()) return s;
 
     fileSize += wr_size;
@@ -353,6 +353,7 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
   buffer_pos = 0;
 
   zoneFile_ = zoneFile;
+  zoneFile_->SetLevel(&level_);
 
   if (buffered) {
     int ret = posix_memalign((void**)&buffer, block_sz, buffer_sz);

@@ -148,6 +148,7 @@ Status BuildTable(
             file_checksum, file_checksum_func_name);
         return s;
       }
+      file->SetLevel(level);
       file->SetIOPriority(io_priority);
       file->SetWriteLifeTimeHint(write_hint);
 

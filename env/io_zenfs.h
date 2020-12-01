@@ -48,6 +48,7 @@ class ZoneFile {
   uint64_t fileSize;
   std::string filename_;
   uint64_t file_id_;
+  int* level_;
 
   uint32_t nr_synced_extents_;
 
@@ -73,6 +74,8 @@ class ZoneFile {
                           char* scratch, bool direct);
   ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
   void PushExtent();
+  void SetLevel(int* level) { level_ = level; }
+  int GetLevel() { return *level_; }
 
   void EncodeTo(std::string* output, uint32_t extent_start);
   void EncodeUpdateTo(std::string* output) {

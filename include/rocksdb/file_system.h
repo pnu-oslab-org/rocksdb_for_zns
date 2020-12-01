@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdint.h>
+
 #include <chrono>
 #include <cstdarg>
 #include <functional>
@@ -25,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
 #include "rocksdb/options.h"
@@ -99,14 +101,12 @@ struct FileOptions : EnvOptions {
 
   FileOptions() : EnvOptions() {}
 
-  FileOptions(const DBOptions& opts)
-    : EnvOptions(opts) {}
+  FileOptions(const DBOptions& opts) : EnvOptions(opts) {}
 
-  FileOptions(const EnvOptions& opts)
-    : EnvOptions(opts) {}
+  FileOptions(const EnvOptions& opts) : EnvOptions(opts) {}
 
   FileOptions(const FileOptions& opts)
-    : EnvOptions(opts), io_options(opts.io_options) {}
+      : EnvOptions(opts), io_options(opts.io_options) {}
 
   FileOptions& operator=(const FileOptions& opts) = default;
 };
@@ -227,8 +227,7 @@ class FileSystem {
   // The returned file may be concurrently accessed by multiple threads.
   virtual IOStatus NewRandomAccessFile(
       const std::string& fname, const FileOptions& file_opts,
-      std::unique_ptr<FSRandomAccessFile>* result,
-      IODebugContext* dbg) = 0;
+      std::unique_ptr<FSRandomAccessFile>* result, IODebugContext* dbg) = 0;
   // These values match Linux definition
   // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/fcntl.h#n56
   enum WriteLifeTimeHint {
@@ -375,7 +374,8 @@ class FileSystem {
   virtual IOStatus Truncate(const std::string& /*fname*/, size_t /*size*/,
                             const IOOptions& /*options*/,
                             IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("Truncate is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "Truncate is not supported for this FileSystem");
   }
 
   // Create the specified directory. Returns error if directory exists.
@@ -412,7 +412,8 @@ class FileSystem {
                             const std::string& /*target*/,
                             const IOOptions& /*options*/,
                             IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("LinkFile is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "LinkFile is not supported for this FileSystem");
   }
 
   virtual IOStatus NumFileLinks(const std::string& /*fname*/,
@@ -426,7 +427,8 @@ class FileSystem {
                                 const std::string& /*second*/,
                                 const IOOptions& /*options*/, bool* /*res*/,
                                 IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("AreFilesSame is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "AreFilesSame is not supported for this FileSystem");
   }
 
   // Lock the specified file.  Used to prevent concurrent access to
@@ -490,7 +492,7 @@ class FileSystem {
   // the FileOptions in the parameters, but is optimized for writing log files.
   // Default implementation returns the copy of the same object.
   virtual FileOptions OptimizeForLogWrite(const FileOptions& file_options,
-                                         const DBOptions& db_options) const;
+                                          const DBOptions& db_options) const;
 
   // OptimizeForManifestWrite will create a new FileOptions object that is a
   // copy of the FileOptions in the parameters, but is optimized for writing
@@ -717,6 +719,7 @@ class FSWritableFile {
   FSWritableFile()
       : last_preallocated_block_(0),
         preallocation_block_size_(0),
+        level_(-1),
         io_priority_(Env::IO_TOTAL),
         write_hint_(Env::WLTH_NOT_SET),
         strict_bytes_per_sync_(false) {}
@@ -913,6 +916,10 @@ class FSWritableFile {
     return IOStatus::OK();
   }
 
+  void SetLevel(int level) { level_ = level; }
+
+  int GetLevel(void) { return level_; }
+
   // If you're adding methods here, remember to add them to
   // WritableFileWrapper too.
 
@@ -922,6 +929,10 @@ class FSWritableFile {
  private:
   size_t last_preallocated_block_;
   size_t preallocation_block_size_;
+ public:
+  int level_;
+
+ private:
   // No copying allowed
   FSWritableFile(const FSWritableFile&);
   void operator=(const FSWritableFile&);
@@ -1057,8 +1068,7 @@ class FileSystemWrapper : public FileSystem {
   FileSystem* target() const { return target_.get(); }
 
   // The following text is boilerplate that forwards all methods to target()
-  IOStatus NewSequentialFile(const std::string& f,
-                             const FileOptions& file_opts,
+  IOStatus NewSequentialFile(const std::string& f, const FileOptions& file_opts,
                              std::unique_ptr<FSSequentialFile>* r,
                              IODebugContext* dbg) override {
     return target_->NewSequentialFile(f, file_opts, r, dbg);
@@ -1085,8 +1095,7 @@ class FileSystemWrapper : public FileSystem {
                              const FileOptions& file_opts,
                              std::unique_ptr<FSWritableFile>* r,
                              IODebugContext* dbg) override {
-    return target_->ReuseWritableFile(fname, old_fname, file_opts, r,
-                                      dbg);
+    return target_->ReuseWritableFile(fname, old_fname, file_opts, r, dbg);
   }
   IOStatus NewRandomRWFile(const std::string& fname,
                            const FileOptions& file_opts,
@@ -1203,7 +1212,7 @@ class FileSystemWrapper : public FileSystem {
   }
 
   FileOptions OptimizeForLogRead(
-                  const FileOptions& file_options) const override {
+      const FileOptions& file_options) const override {
     return target_->OptimizeForLogRead(file_options);
   }
   FileOptions OptimizeForManifestRead(
@@ -1211,7 +1220,7 @@ class FileSystemWrapper : public FileSystem {
     return target_->OptimizeForManifestRead(file_options);
   }
   FileOptions OptimizeForLogWrite(const FileOptions& file_options,
-                                 const DBOptions& db_options) const override {
+                                  const DBOptions& db_options) const override {
     return target_->OptimizeForLogWrite(file_options, db_options);
   }
   FileOptions OptimizeForManifestWrite(
@@ -1399,6 +1408,10 @@ class FSWritableFileWrapper : public FSWritableFile {
                     IODebugContext* dbg) override {
     return target_->Allocate(offset, len, options, dbg);
   }
+
+  void SetLevel(int level) { target_->SetLevel(level); }
+
+  int GetLevel(void) { return target_->GetLevel(); }
 
  private:
   FSWritableFile* target_;

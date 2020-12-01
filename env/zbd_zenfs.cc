@@ -168,7 +168,7 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
   zone_log_file_ = fopen("zone.log", "w");
   assert(NULL != zone_log_file_);
-  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s\n", "TIME(ms)", "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE");
+  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)", "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE", "ZONE LEVEL");
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -458,6 +458,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     }
   }
 
+#if 0
   /* Try to fill an already open zone(with the best life time diff) */
   for (const auto z : io_zones) {
     if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
@@ -468,6 +469,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
       }
     }
   }
+#endif
 
   /* If we did not find a good match, allocate an empty one */
   if (best_diff >= LIFETIME_DIFF_NOT_GOOD) {
@@ -519,9 +521,9 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *
 
   zone = AllocateZone(lifetime);
   if (!before_zone) {
-	  fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "NEW", 0, zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize());
+	  fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu%-10d\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "NEW", 0, zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(), zone_file->GetLevel());
   } else {
-	  fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "EXHAUST", before_zone->GetZoneNr(), zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize());
+	  fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "EXHAUST", before_zone->GetZoneNr(), zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(), zone_file->GetLevel());
   }
 
   return zone;
