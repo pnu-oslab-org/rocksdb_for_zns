@@ -299,13 +299,12 @@ uint64_t ZonedBlockDevice::GetFreeSpace() {
   return free;
 }
 
-uint64_t ZonedBlockDevice::GetTotalSpace() {
-  uint64_t total = 0;
+uint32_t ZonedBlockDevice::GetEmptyZones() {
+  uint32_t free = 0;
   for (const auto z : io_zones) {
-    total += z->max_capacity_;
+    free += z->IsEmpty() == true ? 1 : 0;
   }
-
-  return total;
+  return free;
 }
 
 void ZonedBlockDevice::LogZoneStats() {
@@ -432,13 +431,13 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     });
   }
 
-  fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "REMAIN", GetTotalSpace(), GetFreeSpace());
+  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "REMAIN", GetNrZones(), GetEmptyZones());
   /* Reset any unused zones and finish used zones under capacity treshold*/
   for (const auto z : io_zones) {
     if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
       continue;
 
-    if (!z->IsUsed() && (GetFreeSpace() * 10 < GetTotalSpace())) {
+    if (!z->IsUsed() && (GetEmptyZones() * 10 <= GetNrZones() * 3)) {
       if (!z->IsFull()) active_io_zones_--;
       s = z->Reset();
       if (!s.ok()) {
