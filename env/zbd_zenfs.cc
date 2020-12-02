@@ -299,6 +299,15 @@ uint64_t ZonedBlockDevice::GetFreeSpace() {
   return free;
 }
 
+uint64_t ZonedBlockDevice::GetTotalSpace() {
+  uint64_t total = 0;
+  for (const auto z : io_zones) {
+    total += z->max_capacity_;
+  }
+
+  return total;
+}
+
 void ZonedBlockDevice::LogZoneStats() {
   uint64_t used_capacity = 0;
   uint64_t reclaimable_capacity = 0;
@@ -423,12 +432,13 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     });
   }
 
+  fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "REMAIN", GetTotalSpace(), GetFreeSpace());
   /* Reset any unused zones and finish used zones under capacity treshold*/
   for (const auto z : io_zones) {
     if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
       continue;
 
-    if (!z->IsUsed()) {
+    if (!z->IsUsed() && (GetFreeSpace() * 10 < GetTotalSpace())) {
       if (!z->IsFull()) active_io_zones_--;
       s = z->Reset();
       if (!s.ok()) {
@@ -438,7 +448,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
       continue;
     }
 
-    if ((z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100))) {
+    if ((z->capacity_ > 0)) {
       /* If there is less than finish_threshold_% remaining capacity in a
        * non-open-zone, finish the zone */
       s = z->Finish();
@@ -461,7 +471,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
 #if 0
   /* Try to fill an already open zone(with the best life time diff) */
   for (const auto z : io_zones) {
-    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
+    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && z->IsFull()) {
       unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
       if (diff <= best_diff) {
         allocated_zone = z;
@@ -470,6 +480,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     }
   }
 #endif
+
+  best_diff = LIFETIME_DIFF_NOT_GOOD;
 
   /* If we did not find a good match, allocate an empty one */
   if (best_diff >= LIFETIME_DIFF_NOT_GOOD) {
