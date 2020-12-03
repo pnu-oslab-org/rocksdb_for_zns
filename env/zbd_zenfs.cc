@@ -168,7 +168,9 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
   zone_log_file_ = fopen("zone.log", "w");
   assert(NULL != zone_log_file_);
-  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)", "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE", "ZONE LEVEL");
+  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)",
+          "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE",
+          "ZONE LEVEL");
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -412,101 +414,146 @@ void ZonedBlockDevice::ResetUnusedIOZones() {
   }
 }
 
+void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
+  std::unique_lock<std::mutex> lk(zone_resources_mtx_);
+  zone_resources_.wait(lk, [this] {
+    if (open_io_zones_.load() < max_nr_open_io_zones_) return true;
+    return false;
+  });
+}
+
+/* Except for NORMAL_EXIT, all states must arise "continue" operation after this
+ * method */
+ZoneGcState ZonedBlockDevice::ZoneGC(Zone *z, bool reset_condition,
+                                     bool finish_condition,
+                                     Zone **callback_victim) {
+  Status s;
+  Zone *finish_victim = nullptr;
+  if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
+    return ZoneGcState::NOT_GC_TARGET;
+
+  if (reset_condition) {
+    if (!z->IsFull()) active_io_zones_--;
+    s = z->Reset();
+    if (!s.ok()) {
+      Debug(logger_, "Failed resetting zone !");
+    }
+    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
+            z->GetZoneNr());
+    return ZoneGcState::DO_RESET;
+  }
+
+  if (finish_condition) {
+    /* If there is less than finish_threshold_% remaining capacity in a
+     * non-open-zone, finish the zone */
+    s = z->Finish();
+    if (!s.ok()) {
+      Debug(logger_, "Failed finishing zone");
+    }
+    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FINISH", 0,
+            z->GetZoneNr());
+    active_io_zones_--;
+  }
+
+  if (!z->IsFull()) {
+    if (finish_victim == nullptr) {
+      finish_victim = z;
+    } else if (finish_victim->capacity_ > z->capacity_) {
+      finish_victim = z;
+    }
+  }
+
+  *callback_victim = finish_victim;
+  return ZoneGcState::NORMAL_EXIT;
+}
+
+int ZonedBlockDevice::AllocateEmptyZone(unsigned int best_diff,
+                                        Zone *finish_victim,
+                                        Zone **allocated_zone,
+                                        Env::WriteLifeTimeHint file_lifetime) {
+  Status s;
+  int new_zone = 0;
+
+  /* If we did not find a good match, allocate an empty one */
+  if (best_diff < LIFETIME_DIFF_NOT_GOOD) {
+    return new_zone;
+  }
+  /* If we at the active io zone limit, finish an open zone(if available) with
+   * least capacity left */
+  if (active_io_zones_.load() == max_nr_active_io_zones_ &&
+      finish_victim != nullptr) {
+    s = finish_victim->Finish();
+    if (!s.ok()) {
+      Debug(logger_, "Failed finishing zone");
+    }
+    active_io_zones_--;
+  }
+
+  if (active_io_zones_.load() < max_nr_active_io_zones_) {
+    for (const auto z : io_zones) {
+      if ((!z->open_for_write_) && z->IsEmpty()) {
+        z->lifetime_ = file_lifetime;
+        *allocated_zone = z;
+        active_io_zones_++;
+        new_zone = 1;
+        break;
+      }
+    }  // end of for
+  }
+  return new_zone;
+}  // namespace ROCKSDB_NAMESPACE
+
+int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone,
+                                         Env::WriteLifeTimeHint file_lifetime) {
+  unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
+  /* Try to fill an already open zone(with the best life time diff) */
+
+  for (const auto z : io_zones) {
+    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && z->IsFull()) {
+      unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
+      if (diff <= best_diff) {
+        *allocated_zone = z;
+        best_diff = diff;
+      }
+    }
+  }
+  return best_diff;
+}
+
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   Zone *allocated_zone = nullptr;
   Zone *finish_victim = nullptr;
-  unsigned int best_diff = LIFETIME_DIFF_NOT_GOOD;
-  int new_zone = 0;
-  Status s;
+
+  unsigned int best_diff;
+  int new_zone;
 
   assert(NULL != zone_log_file_);
   io_zones_mtx.lock();
 
   /* Make sure we are below the zone open limit */
-  {
-    std::unique_lock<std::mutex> lk(zone_resources_mtx_);
-    zone_resources_.wait(lk, [this] {
-      if (open_io_zones_.load() < max_nr_open_io_zones_) return true;
-      return false;
-    });
-  }
+  WaitUntilZoneOpenAvail();
 
-  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "REMAIN", GetNrZones(), GetEmptyZones());
-  /* Reset any unused zones and finish used zones under capacity treshold*/
+  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
+          (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
+          GetNrZones(), GetEmptyZones());
+
   for (const auto z : io_zones) {
-    if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
-      continue;
+    bool reset_cond =
+        (!z->IsUsed() && (GetEmptyZones() * 10 <= GetNrZones() * 3));
+    bool finish_cond = (z->capacity_ > 0);
 
-    if (!z->IsUsed() && (GetEmptyZones() * 10 <= GetNrZones() * 3)) {
-      if (!z->IsFull()) active_io_zones_--;
-      s = z->Reset();
-      if (!s.ok()) {
-        Debug(logger_, "Failed resetting zone !");
-      }
-      fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "RESET", 0, z->GetZoneNr());
-      continue;
-    }
-
-    if ((z->capacity_ > 0)) {
-      /* If there is less than finish_threshold_% remaining capacity in a
-       * non-open-zone, finish the zone */
-      s = z->Finish();
-      if (!s.ok()) {
-        Debug(logger_, "Failed finishing zone");
-      }
-      fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "FINISH", 0, z->GetZoneNr());
-      active_io_zones_--;
-    }
-
-    if (!z->IsFull()) {
-      if (finish_victim == nullptr) {
-        finish_victim = z;
-      } else if (finish_victim->capacity_ > z->capacity_) {
-        finish_victim = z;
-      }
-    }
+    (void)ZoneGC(z, reset_cond, finish_cond, &finish_victim);
   }
 
 #if 0
-  /* Try to fill an already open zone(with the best life time diff) */
-  for (const auto z : io_zones) {
-    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && z->IsFull()) {
-      unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
-      if (diff <= best_diff) {
-        allocated_zone = z;
-        best_diff = diff;
-      }
-    }
-  }
-#endif
-
+  best_diff = GetAlreadyOpenZone(&allocated_zone, file_lifetime);
+#else
   best_diff = LIFETIME_DIFF_NOT_GOOD;
-
-  /* If we did not find a good match, allocate an empty one */
-  if (best_diff >= LIFETIME_DIFF_NOT_GOOD) {
-    /* If we at the active io zone limit, finish an open zone(if available) with
-     * least capacity left */
-    if (active_io_zones_.load() == max_nr_active_io_zones_ &&
-        finish_victim != nullptr) {
-      s = finish_victim->Finish();
-      if (!s.ok()) {
-        Debug(logger_, "Failed finishing zone");
-      }
-      active_io_zones_--;
-    }
-
-    if (active_io_zones_.load() < max_nr_active_io_zones_) {
-      for (const auto z : io_zones) {
-        if ((!z->open_for_write_) && z->IsEmpty()) {
-          z->lifetime_ = file_lifetime;
-          allocated_zone = z;
-          active_io_zones_++;
-          new_zone = 1;
-          break;
-        }
-      }
-    }
-  }
+#endif
+  new_zone = AllocateEmptyZone(best_diff, finish_victim, &allocated_zone,
+                               file_lifetime);
 
   if (allocated_zone) {
     assert(!allocated_zone->open_for_write_);
@@ -524,7 +571,8 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   return allocated_zone;
 }
 
-Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file, Zone *before_zone) {
+Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
+                                     ZoneFile *zone_file, Zone *before_zone) {
   Zone *zone = NULL;
 
   assert(NULL != zone_file);
@@ -532,9 +580,16 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *
 
   zone = AllocateZone(lifetime);
   if (!before_zone) {
-	  fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu%-10d\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "NEW", 0, zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(), zone_file->GetLevel());
+    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu%-10d\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "NEW", 0,
+            zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0,
+            zone_file->GetFileSize(), zone_file->GetLevel());
   } else {
-	  fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n", (long int)((double)clock()/CLOCKS_PER_SEC * 1000), "EXHAUST", before_zone->GetZoneNr(), zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(), zone_file->GetLevel());
+    fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "EXHAUST",
+            before_zone->GetZoneNr(), zone->GetZoneNr(),
+            zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(),
+            zone_file->GetLevel());
   }
 
   return zone;

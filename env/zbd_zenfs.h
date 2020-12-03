@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -29,6 +30,8 @@
 #include "rocksdb/io_status.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+enum class ZoneGcState { NOT_GC_TARGET, DO_RESET, NORMAL_EXIT };
 
 class ZonedBlockDevice;
 class ZoneFile;
@@ -123,6 +126,16 @@ class ZonedBlockDevice {
 
   void NotifyIOZoneFull();
   void NotifyIOZoneClosed();
+
+ private:
+  void WaitUntilZoneOpenAvail();
+  ZoneGcState ZoneGC(Zone *z, bool reset_condition, bool finish_condition,
+                     Zone **callback_victim);
+  int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
+                        Zone **allocated_zone,
+                        Env::WriteLifeTimeHint file_lifetime);
+  int GetAlreadyOpenZone(Zone **allocated_zone,
+                         Env::WriteLifeTimeHint file_lifetime);
 };
 
 }  // namespace ROCKSDB_NAMESPACE
