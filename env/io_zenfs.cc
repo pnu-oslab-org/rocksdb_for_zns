@@ -166,6 +166,7 @@ ZoneFile::~ZoneFile() {
 
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
+    zone->RemoveZoneFile(this);
     delete *e;
   }
   CloseWR();
@@ -304,6 +305,8 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
     }
     extent_start_ = active_zone_->wp_;
     extent_filepos_ = fileSize;
+
+    active_zone_->SetZoneFile(this, extent_start_);
   }
 
   while (left) {
@@ -317,6 +320,8 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
       }
       extent_start_ = active_zone_->wp_;
       extent_filepos_ = fileSize;
+
+      active_zone_->SetZoneFile(this, extent_start_);
     }
 
     wr_size = left;

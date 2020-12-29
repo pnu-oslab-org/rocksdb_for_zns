@@ -36,7 +36,7 @@
  */
 #define ZENFS_META_ZONES (3)
 
-// #define ZONE_MIX
+#define ZONE_MIX
 
 #if defined(ZONE_MIX)
 #pragma message("ZONE_MIX mode enabled")
@@ -89,17 +89,17 @@ void Zone::RemoveZoneFile(ZoneFile *file) {
   auto item = file_map_.find(file);
 
   assert(NULL != file);
-  assert(file_map_.end() != item);
-
-  file_map_.erase(item);
+  if (file_map_.end() != item) {
+    file_map_.erase(item);
+  }
 }
 
 void Zone::PrintZoneFiles(FILE *fp) {
   assert(NULL != fp);
 
   for (const auto &item : file_map_) {
-    fprintf(fp, "(zone: %lu) %s %d\n", item->first->GetFilename().c_str(),
-            item->second);
+    fprintf(fp, "(zone: %lu) %s %lu\n", GetZoneNr(),
+            item.first->GetFilename().c_str(), item.second);
   }
 }
 
@@ -554,7 +554,7 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone,
   /* Try to fill an already open zone(with the best life time diff) */
 
   for (const auto z : io_zones) {
-    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && z->IsFull()) {
+    if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
       unsigned int diff = GetLifeTimeDiff(z->lifetime_, file_lifetime);
       if (diff <= best_diff) {
         *allocated_zone = z;
@@ -584,7 +584,7 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
 
   for (const auto z : io_zones) {
     bool reset_cond, finish_cond;
-#if defined(ZENFS_MIX)
+#if defined(ZONE_MIX)
     reset_cond = (!z->IsUsed());
     finish_cond = (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
 #else
@@ -592,10 +592,11 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
     finish_cond = (z->capacity_ > 0);
 #endif
 
+    z->PrintZoneFiles(zone_log_file_);
     (void)ZoneGc(z, reset_cond, finish_cond, &finish_victim);
   }
 
-#if defined(ZENFS_MIX)
+#if defined(ZONE_MIX)
   best_diff = GetAlreadyOpenZone(&allocated_zone, file_lifetime);
 #else
   best_diff = LIFETIME_DIFF_NOT_GOOD;
