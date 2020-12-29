@@ -25,6 +25,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,7 @@ enum class ZoneGcState { NOT_GC_TARGET, DO_RESET, NORMAL_EXIT };
 
 class ZonedBlockDevice;
 class ZoneFile;
+class ZoneExtent;
 
 #define ZONE_EXTENT_FIND_FAIL (std::numeric_limits<uint64_t>::max())
 
@@ -53,7 +55,7 @@ class Zone {
   bool open_for_write_;
   Env::WriteLifeTimeHint lifetime_;
   std::atomic<long> used_capacity_;
-  std::vector<ZoneFile *> file_list_;
+  std::unordered_map<ZoneFile *, uint64_t> file_map_;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -66,7 +68,8 @@ class Zone {
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
 
-  void SetZoneFile(ZoneFile *file);
+  void SetZoneFile(ZoneFile *file, uint64_t extent_start);
+  uint64_t GetZoneExtent(ZoneFile *file);
   void RemoveZoneFile(ZoneFile *file);
   void PrintZoneFiles(FILE *fp);
 
@@ -98,6 +101,8 @@ class ZonedBlockDevice {
 
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
+
+  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, bool is_gc);
 
  public:
   explicit ZonedBlockDevice(std::string bdevname,
@@ -139,14 +144,13 @@ class ZonedBlockDevice {
  private:
   void WaitUntilZoneOpenAvail();
   Zone *ZoneSelectVictim();
-  ZoneGcState ZoneGc(Zone *z);
+  ZoneGcState ZoneGc(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
-                        Zone **allocated_zone,
-                        Env::WriteLifeTimeHint file_lifetime);
+                        Zone **allocated_zone, Env::WriteLifeTimeHint lifetime);
   int GetAlreadyOpenZone(Zone **allocated_zone,
-                         Env::WriteLifeTimeHint file_lifetime);
+                         Env::WriteLifeTimeHint lifetime);
 };
 
 }  // namespace ROCKSDB_NAMESPACE

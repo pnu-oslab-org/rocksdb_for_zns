@@ -73,6 +73,7 @@ class ZoneFile {
   IOStatus PositionedRead(uint64_t offset, size_t n, Slice* result,
                           char* scratch, bool direct);
   ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
+  ZoneExtent* GetExtent(uint64_t extent_start);
   void PushExtent();
   void SetLevel(int* level) { level_ = level; }
   int GetLevel() { return *level_; }

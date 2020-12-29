@@ -191,6 +191,15 @@ ZoneExtent* ZoneFile::GetExtent(uint64_t file_offset, uint64_t* dev_offset) {
   return NULL;
 }
 
+ZoneExtent* ZoneFile::GetExtent(uint64_t extent_start) {
+  for (auto extent : extents_) {
+    if (extent->start_ == extent_start) {
+      return extent;
+    }
+  }
+  return nullptr;
+}
+
 IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
                                   char* scratch, bool direct) {
   int f = zbd_->GetReadFD();
@@ -306,7 +315,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
     extent_start_ = active_zone_->wp_;
     extent_filepos_ = fileSize;
 
-    active_zone_->SetZoneFile(this);
+    active_zone_->SetZoneFile(this, extent_start_);
   }
 
   while (left) {
@@ -321,7 +330,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
       extent_start_ = active_zone_->wp_;
       extent_filepos_ = fileSize;
 
-      active_zone_->SetZoneFile(this);
+      active_zone_->SetZoneFile(this, extent_start_);
     }
 
     wr_size = left;
