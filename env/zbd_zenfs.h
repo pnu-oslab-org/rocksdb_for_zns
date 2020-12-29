@@ -15,6 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -24,7 +25,6 @@
 #include <limits>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -43,9 +43,6 @@ class ZoneFile;
 class Zone {
   ZonedBlockDevice *zbd_;
 
- private:
-  std::unordered_map<ZoneFile *, uint64_t> file_map_;
-
  public:
   explicit Zone(ZonedBlockDevice *zbd, struct zbd_zone *z);
 
@@ -56,6 +53,7 @@ class Zone {
   bool open_for_write_;
   Env::WriteLifeTimeHint lifetime_;
   std::atomic<long> used_capacity_;
+  std::vector<ZoneFile *> file_list_;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -68,8 +66,7 @@ class Zone {
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
 
-  void SetZoneFile(ZoneFile *file, uint64_t extent_start);
-  uint64_t GetExtentStart(ZoneFile *file);
+  void SetZoneFile(ZoneFile *file);
   void RemoveZoneFile(ZoneFile *file);
   void PrintZoneFiles(FILE *fp);
 
@@ -141,8 +138,10 @@ class ZonedBlockDevice {
 
  private:
   void WaitUntilZoneOpenAvail();
-  ZoneGcState ZoneGc(Zone *z, bool reset_condition, bool finish_condition,
-                     Zone **callback_victim);
+  Zone *ZoneSelectVictim();
+  ZoneGcState ZoneGc(Zone *z);
+  ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
+                                 bool finish_condition, Zone **callback_victim);
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
                         Zone **allocated_zone,
                         Env::WriteLifeTimeHint file_lifetime);

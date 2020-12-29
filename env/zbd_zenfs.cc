@@ -68,38 +68,27 @@ bool Zone::IsFull() { return (capacity_ == 0); }
 bool Zone::IsEmpty() { return (wp_ == start_); }
 uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
 
-void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
-  assert(NULL != file);
+void Zone::SetZoneFile(ZoneFile *file) {
+  assert(nullptr != file);
 
-  file_map_.insert({file, extent_start});
-}
-
-uint64_t Zone::GetExtentStart(ZoneFile *file) {
-  uint64_t extent_start = ZONE_EXTENT_FIND_FAIL;
-  auto item = file_map_.find(file);
-
-  assert(NULL != file);
-  if (item != file_map_.end()) {
-    extent_start = item->second;
-  }
-  return extent_start;
+  file_list_.push_back(file);
 }
 
 void Zone::RemoveZoneFile(ZoneFile *file) {
-  auto item = file_map_.find(file);
+  assert(nullptr != file);
 
-  assert(NULL != file);
-  if (file_map_.end() != item) {
-    file_map_.erase(item);
+  auto item = std::find(file_list_.begin(), file_list_.end(), file);
+
+  if (file_list_.end() != item) {
+    file_list_.erase(item);
   }
 }
 
 void Zone::PrintZoneFiles(FILE *fp) {
-  assert(NULL != fp);
+  assert(nullptr != fp);
 
-  for (const auto &item : file_map_) {
-    fprintf(fp, "(zone: %lu) %s %lu\n", GetZoneNr(),
-            item.first->GetFilename().c_str(), item.second);
+  for (const auto item : file_list_) {
+    fprintf(fp, "(zone: %lu) %s\n", GetZoneNr(), item->GetFilename().c_str());
   }
 }
 
@@ -210,7 +199,7 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
     : filename_("/dev/" + bdevname), logger_(logger) {
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
   zone_log_file_ = fopen("zone.log", "w");
-  assert(NULL != zone_log_file_);
+  assert(nullptr != zone_log_file_);
   fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)",
           "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE",
           "ZONE LEVEL");
@@ -465,11 +454,57 @@ void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
   });
 }
 
+Zone *ZonedBlockDevice::ZoneSelectVictim() {
+  Zone *victim = nullptr;
+  uint64_t diff = 0;
+  uint64_t used_capacity = 0;
+  uint64_t write_capacity = 0;
+  for (const auto z : io_zones) {
+    used_capacity = (uint64_t)z->used_capacity_;
+    write_capacity = (z->wp_ - z->start_);
+    if (z->open_for_write_) {
+      continue;
+    }
+
+    if (write_capacity == used_capacity) {
+      continue;
+    }
+
+    if (write_capacity > diff + used_capacity) {
+      diff = write_capacity - used_capacity;
+      victim = z;
+    }
+  }
+  return victim;
+}
+
+ZoneGcState ZonedBlockDevice::ZoneGc(Zone *z) {
+  Zone *allocated_zone = nullptr;
+
+  /* TODO: This may make the mixed state. WATCH OUT */
+  best_diff = GetAlreadyOpenZone(&allocated_zone, file_lifetime);
+  // best_diff = LIFETIME_DIFF_NOT_GOOD; /* Use when you want to no-mix */
+  new_zone = AllocateEmptyZone(best_diff, finish_victim, &allocated_zone,
+                               file_lifetime);
+
+  if (allocated_zone) {
+    assert(!allocated_zone->open_for_write_);
+    allocated_zone->open_for_write_ = true;
+    open_io_zones_++;
+    Debug(logger_,
+          "Allocating zone(new=%d) start: 0x%lx wp: 0x%lx lt: %d file lt: %d\n",
+          new_zone, allocated_zone->start_, allocated_zone->wp_,
+          allocated_zone->lifetime_, file_lifetime);
+  }
+
+  return ZoneGcState::NORMAL_EXIT;
+}
+
 /* Except for NORMAL_EXIT, all states must arise "continue" operation after this
  * method */
-ZoneGcState ZonedBlockDevice::ZoneGc(Zone *z, bool reset_condition,
-                                     bool finish_condition,
-                                     Zone **callback_victim) {
+ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
+                                                 bool finish_condition,
+                                                 Zone **callback_victim) {
   Status s;
   Zone *finish_victim = nullptr;
   if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
@@ -568,11 +603,12 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone,
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
   Zone *allocated_zone = nullptr;
   Zone *finish_victim = nullptr;
+  Zone *gc_target = nullptr;
 
   unsigned int best_diff;
   int new_zone;
 
-  assert(NULL != zone_log_file_);
+  assert(nullptr != zone_log_file_);
   io_zones_mtx.lock();
 
   /* Make sure we are below the zone open limit */
@@ -593,7 +629,13 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
 #endif
 
     z->PrintZoneFiles(zone_log_file_);
-    (void)ZoneGc(z, reset_cond, finish_cond, &finish_victim);
+    (void)ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
+  }
+
+  gc_target = ZoneSelectVictim();
+  if (gc_target) {
+    (void)ZoneGc(gc_target);
+    fprintf(zone_log_file_, "VICTIM: %ld\n", gc_target->GetZoneNr());
   }
 
 #if defined(ZONE_MIX)
@@ -622,10 +664,10 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint file_lifetime) {
 
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
                                      ZoneFile *zone_file, Zone *before_zone) {
-  Zone *zone = NULL;
+  Zone *zone = nullptr;
 
-  assert(NULL != zone_file);
-  assert(NULL != zone_log_file_);
+  assert(nullptr != zone_file);
+  assert(nullptr != zone_log_file_);
 
   zone = AllocateZone(lifetime);
   if (!before_zone) {
