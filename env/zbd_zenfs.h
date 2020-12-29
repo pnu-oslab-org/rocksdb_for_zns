@@ -23,6 +23,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -129,7 +130,7 @@ class ZonedBlockDevice {
 
  private:
   void WaitUntilZoneOpenAvail();
-  ZoneGcState ZoneGC(Zone *z, bool reset_condition, bool finish_condition,
+  ZoneGcState ZoneGc(Zone *z, bool reset_condition, bool finish_condition,
                      Zone **callback_victim);
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
                         Zone **allocated_zone,
