@@ -50,8 +50,11 @@
 namespace ROCKSDB_NAMESPACE {
 
 Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
-    : zbd_(zbd), start_(zbd_zone_start(z)), max_capacity_(zbd_zone_capacity(z)),
-      wp_(zbd_zone_wp(z)), open_for_write_(false) {
+    : zbd_(zbd),
+      start_(zbd_zone_start(z)),
+      max_capacity_(zbd_zone_capacity(z)),
+      wp_(zbd_zone_wp(z)),
+      open_for_write_(false) {
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
@@ -65,6 +68,41 @@ bool Zone::IsFull() { return (capacity_ == 0); }
 bool Zone::IsEmpty() { return (wp_ == start_); }
 uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
 
+void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
+  assert(NULL != file);
+
+  file_map_.insert({file, extent_start});
+}
+
+uint64_t Zone::GetExtentStart(ZoneFile *file) {
+  uint64_t extent_start = ZONE_EXTENT_FIND_FAIL;
+  auto item = file_map_.find(file);
+
+  assert(NULL != file);
+  if (item != file_map_.end()) {
+    extent_start = item->second;
+  }
+  return extent_start;
+}
+
+void Zone::RemoveZoneFile(ZoneFile *file) {
+  auto item = file_map_.find(file);
+
+  assert(NULL != file);
+  assert(file_map_.end() != item);
+
+  file_map_.erase(item);
+}
+
+void Zone::PrintZoneFiles(FILE *fp) {
+  assert(NULL != fp);
+
+  for (const auto &item : file_map_) {
+    fprintf(fp, "(zone: %lu) %s %d\n", item->first->GetFilename().c_str(),
+            item->second);
+  }
+}
+
 void Zone::CloseWR() {
   assert(open_for_write_);
   open_for_write_ = false;
@@ -73,8 +111,7 @@ void Zone::CloseWR() {
     zbd_->NotifyIOZoneClosed();
   }
 
-  if (capacity_ == 0)
-    zbd_->NotifyIOZoneFull();
+  if (capacity_ == 0) zbd_->NotifyIOZoneFull();
 }
 
 IOStatus Zone::Reset() {
@@ -87,13 +124,11 @@ IOStatus Zone::Reset() {
   assert(!IsUsed());
 
   ret = zbd_reset_zones(fd, start_, zone_sz);
-  if (ret)
-    return IOStatus::IOError("Zone reset failed\n");
+  if (ret) return IOStatus::IOError("Zone reset failed\n");
 
   ret = zbd_report_zones(fd, start_, zone_sz, ZBD_RO_ALL, &z, &report);
 
-  if (ret || (report != 1))
-    return IOStatus::IOError("Zone report failed\n");
+  if (ret || (report != 1)) return IOStatus::IOError("Zone report failed\n");
 
   if (zbd_zone_offline(&z))
     capacity_ = 0;
@@ -114,8 +149,7 @@ IOStatus Zone::Finish() {
   assert(!open_for_write_);
 
   ret = zbd_finish_zones(fd, start_, zone_sz);
-  if (ret)
-    return IOStatus::IOError("Zone finish failed\n");
+  if (ret) return IOStatus::IOError("Zone finish failed\n");
 
   capacity_ = 0;
   wp_ = start_ + zone_sz;
@@ -132,8 +166,7 @@ IOStatus Zone::Close() {
 
   if (!(IsEmpty() || IsFull())) {
     ret = zbd_close_zones(fd, start_, zone_sz);
-    if (ret)
-      return IOStatus::IOError("Zone close failed\n");
+    if (ret) return IOStatus::IOError("Zone close failed\n");
   }
 
   return IOStatus::OK();
@@ -152,8 +185,7 @@ IOStatus Zone::Append(char *data, uint32_t size) {
 
   while (left) {
     ret = pwrite(fd, ptr, size, wp_);
-    if (ret < 0)
-      return IOStatus::IOError("Write failed");
+    if (ret < 0) return IOStatus::IOError("Write failed");
 
     ptr += ret;
     wp_ += ret;
@@ -169,8 +201,7 @@ ZoneExtent::ZoneExtent(uint64_t start, uint32_t length, Zone *zone)
 
 Zone *ZonedBlockDevice::GetIOZone(uint64_t offset) {
   for (const auto z : io_zones)
-    if (z->start_ <= offset && offset < (z->start_ + zone_sz_))
-      return z;
+    if (z->start_ <= offset && offset < (z->start_ + zone_sz_)) return z;
   return nullptr;
 }
 
@@ -336,12 +367,10 @@ void ZonedBlockDevice::LogZoneStats() {
       reclaimables_max_capacity += z->max_capacity_;
     }
 
-    if (!(z->IsFull() || z->IsEmpty()))
-      active++;
+    if (!(z->IsFull() || z->IsEmpty())) active++;
   }
 
-  if (reclaimables_max_capacity == 0)
-    reclaimables_max_capacity = 1;
+  if (reclaimables_max_capacity == 0) reclaimables_max_capacity = 1;
 
   Info(logger_,
        "[Zonestats:time(s),used_cap(MB),reclaimable_cap(MB), "
@@ -396,8 +425,7 @@ unsigned int GetLifeTimeDiff(Env::WriteLifeTimeHint zone_lifetime,
     }
   }
 
-  if (zone_lifetime > file_lifetime)
-    return zone_lifetime - file_lifetime;
+  if (zone_lifetime > file_lifetime) return zone_lifetime - file_lifetime;
 
   return LIFETIME_DIFF_NOT_GOOD;
 }
@@ -423,10 +451,8 @@ void ZonedBlockDevice::ResetUnusedIOZones() {
   /* Reset any unused zones */
   for (const auto z : io_zones) {
     if (!z->IsUsed() && !z->IsEmpty()) {
-      if (!z->IsFull())
-        active_io_zones_--;
-      if (!z->Reset().ok())
-        Warn(logger_, "Failed reseting zone");
+      if (!z->IsFull()) active_io_zones_--;
+      if (!z->Reset().ok()) Warn(logger_, "Failed reseting zone");
     }
   }
 }
@@ -434,8 +460,7 @@ void ZonedBlockDevice::ResetUnusedIOZones() {
 void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
   std::unique_lock<std::mutex> lk(zone_resources_mtx_);
   zone_resources_.wait(lk, [this] {
-    if (open_io_zones_.load() < max_nr_open_io_zones_)
-      return true;
+    if (open_io_zones_.load() < max_nr_open_io_zones_) return true;
     return false;
   });
 }
@@ -451,8 +476,7 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Zone *z, bool reset_condition,
     return ZoneGcState::NOT_GC_TARGET;
 
   if (reset_condition) {
-    if (!z->IsFull())
-      active_io_zones_--;
+    if (!z->IsFull()) active_io_zones_--;
     s = z->Reset();
     if (!s.ok()) {
       Debug(logger_, "Failed resetting zone !");
@@ -519,10 +543,10 @@ int ZonedBlockDevice::AllocateEmptyZone(unsigned int best_diff,
         new_zone = 1;
         break;
       }
-    } // end of for
+    }  // end of for
   }
   return new_zone;
-} // namespace ROCKSDB_NAMESPACE
+}  // namespace ROCKSDB_NAMESPACE
 
 int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone,
                                          Env::WriteLifeTimeHint file_lifetime) {
@@ -622,6 +646,6 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
 std::string ZonedBlockDevice::GetFilename() { return filename_; }
 uint32_t ZonedBlockDevice::GetBlockSize() { return block_sz_; }
 
-} // namespace ROCKSDB_NAMESPACE
+}  // namespace ROCKSDB_NAMESPACE
 
-#endif // !defined(ROCKSDB_LITE) && !defined(OS_WIN) && defined(LIBZBD)
+#endif  // !defined(ROCKSDB_LITE) && !defined(OS_WIN) && defined(LIBZBD)

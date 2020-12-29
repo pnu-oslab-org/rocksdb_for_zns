@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -37,8 +38,13 @@ enum class ZoneGcState { NOT_GC_TARGET, DO_RESET, NORMAL_EXIT };
 class ZonedBlockDevice;
 class ZoneFile;
 
+#define ZONE_EXTENT_FIND_FAIL (std::numeric_limits<uint64_t>::max())
+
 class Zone {
   ZonedBlockDevice *zbd_;
+
+ private:
+  std::unordered_map<ZoneFile *, uint64_t> file_map_;
 
  public:
   explicit Zone(ZonedBlockDevice *zbd, struct zbd_zone *z);
@@ -61,6 +67,11 @@ class Zone {
   bool IsEmpty();
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
+
+  void SetZoneFile(ZoneFile *file, uint64_t extent_start);
+  uint64_t GetExtentStart(ZoneFile *file);
+  void RemoveZoneFile(ZoneFile *file);
+  void PrintZoneFiles(FILE *fp);
 
   void CloseWR(); /* Done writing */
 };
