@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -179,6 +180,17 @@ void ZoneFile::CloseWR() {
   }
 }
 
+uint64_t ZoneFile::GetOffset(ZoneExtent* target_extent) {
+  uint64_t file_offset = 0;
+  for (const auto extent : extents_) {
+    if (extent->start_ == target_extent->start_) {
+      return file_offset;
+    }
+    file_offset += extent->length_;
+  }
+  return std::numeric_limits<uint64_t>::max();
+}
+
 ZoneExtent* ZoneFile::GetExtent(uint64_t file_offset, uint64_t* dev_offset) {
   for (unsigned int i = 0; i < extents_.size(); i++) {
     if (file_offset < extents_[i]->length_) {
@@ -283,6 +295,57 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
+void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
+  assert(nullptr != target);
+  assert(nullptr != top);
+
+  std::vector<ZoneExtent*>::iterator target_pos;
+  std::vector<ZoneExtent*> new_extents;
+  target_pos = find(extents_.begin(), extents_.end(), target);
+  assert(extents_.end() != target_pos);
+
+  for (auto rit = extents_.rbegin(); rit != extents_.rend(); rit++) {
+    ZoneExtent* extent = *rit;
+    assert(nullptr != extent);
+    if (extent == top) {
+      break;
+    }
+    new_extents.insert(new_extents.begin(), extent);
+  }
+
+  for (auto rit = new_extents.rbegin(); rit != new_extents.rend(); rit++) {
+    ZoneExtent* extent = *rit;
+    assert(nullptr != extent);
+    extents_.insert(target_pos, extent);
+    extents_.pop_back();
+    fileSize -= extent->length_;
+  }
+
+  extents_.erase(target_pos);
+
+  target->zone_->CloseWR();
+  assert(IOStatus::OK() == target->zone_->Finish());
+  assert(IOStatus::OK() == target->zone_->Reset());
+}
+
+/* You must call this method after the ReplaceExtent() method calls */
+void ZoneFile::RestoreExtent(ZoneExtent* extent, bool has_active) {
+  assert(nullptr != extent);
+  assert(nullptr == active_zone_);
+  assert(nullptr != extent->zone_);
+
+  active_zone_ = extent->zone_;
+  extent_start_ = active_zone_->wp_;
+  extent_filepos_ = fileSize;
+
+  if (!has_active) {
+    active_zone_ = nullptr;
+  } else {
+    delete extents_.back();
+    extents_.pop_back();
+  }
+}
+
 void ZoneFile::PushExtent() {
   uint64_t length;
 
@@ -302,13 +365,14 @@ void ZoneFile::PushExtent() {
 }
 
 /* Assumes that data and size are block aligned */
-IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
+IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
+                          bool is_gc = true) {
   uint32_t left = data_size;
   uint32_t wr_size, offset = 0;
   IOStatus s;
 
   if (active_zone_ == NULL) {
-    active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL);
+    active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL, is_gc);
     if (!active_zone_) {
       return IOStatus::NoSpace("Zone allocation failure\n");
     }
@@ -323,7 +387,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
       PushExtent();
 
       active_zone_->CloseWR();
-      active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_);
+      active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_, is_gc);
       if (!active_zone_) {
         return IOStatus::NoSpace("Zone allocation failure\n");
       }

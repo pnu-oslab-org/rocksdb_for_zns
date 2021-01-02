@@ -24,6 +24,7 @@
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -99,6 +100,8 @@ class ZonedBlockDevice {
 
   FILE *zone_log_file_;
 
+  char *gc_buffer_;
+
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
@@ -113,9 +116,9 @@ class ZonedBlockDevice {
 
   Zone *GetIOZone(uint64_t offset);
 
-  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime);
+  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, bool is_gc);
   Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file,
-                     Zone *before_zone);
+                     Zone *before_zone, bool is_gc);
   Zone *AllocateMetaZone();
 
   uint64_t GetFreeSpace();

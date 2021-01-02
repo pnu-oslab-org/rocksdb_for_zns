@@ -59,21 +59,25 @@ class ZoneFile {
   virtual ~ZoneFile();
 
   void CloseWR();
-  IOStatus Append(void* data, int data_size, int valid_size);
+  IOStatus Append(void* data, int data_size, int valid_size, bool is_gc);
   IOStatus SetWriteLifeTimeHint(Env::WriteLifeTimeHint lifetime);
   std::string GetFilename();
   void Rename(std::string name);
   uint64_t GetFileSize();
   void SetFileSize(uint64_t sz);
 
+  Zone* GetActiveZone() { return active_zone_; }
   uint32_t GetBlockSize() { return zbd_->GetBlockSize(); }
   std::vector<ZoneExtent*> GetExtents() { return extents_; }
   Env::WriteLifeTimeHint GetWriteLifeTimeHint() { return lifetime_; }
 
   IOStatus PositionedRead(uint64_t offset, size_t n, Slice* result,
                           char* scratch, bool direct);
+  uint64_t GetOffset(ZoneExtent* target_extent);
   ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
   ZoneExtent* GetExtent(uint64_t extent_start);
+  void ReplaceExtent(ZoneExtent* target, ZoneExtent* top);
+  void RestoreExtent(ZoneExtent* extent, bool has_active);
   void PushExtent();
   void SetLevel(int* level) { level_ = level; }
   int GetLevel() { return *level_; }
