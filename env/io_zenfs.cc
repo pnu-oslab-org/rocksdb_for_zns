@@ -204,7 +204,7 @@ ZoneExtent* ZoneFile::GetExtent(uint64_t file_offset, uint64_t* dev_offset) {
 }
 
 ZoneExtent* ZoneFile::GetExtent(uint64_t extent_start) {
-  for (auto extent : extents_) {
+  for (const auto extent : extents_) {
     if (extent->start_ == extent_start) {
       return extent;
     }
@@ -316,16 +316,14 @@ void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
   for (auto rit = new_extents.rbegin(); rit != new_extents.rend(); rit++) {
     ZoneExtent* extent = *rit;
     assert(nullptr != extent);
-    extents_.insert(target_pos, extent);
+    extents_.insert(target_pos + 1, extent);
     extents_.pop_back();
     fileSize -= extent->length_;
   }
-
+  target_pos = find(extents_.begin(), extents_.end(), target);
   extents_.erase(target_pos);
-
-  target->zone_->CloseWR();
-  assert(IOStatus::OK() == target->zone_->Finish());
-  assert(IOStatus::OK() == target->zone_->Reset());
+  fprintf(zbd_->GetZoneLogFile(), "Replace it!\n");
+  fflush(zbd_->GetZoneLogFile());
 }
 
 /* You must call this method after the ReplaceExtent() method calls */
@@ -400,13 +398,16 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
     wr_size = left;
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
-    s = active_zone_->Append((char*)data + offset, wr_size);
     fprintf(zbd_->GetZoneLogFile(),
             "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "WRITE",
             (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(),
             wr_size, fileSize, GetLevel());
-    if (!s.ok()) return s;
+    fflush(zbd_->GetZoneLogFile());
+    s = active_zone_->Append((char*)data + offset, wr_size);
+    if (!s.ok()) {
+      return s;
+    }
 
     fileSize += wr_size;
     left -= wr_size;
