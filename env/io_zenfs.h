@@ -25,15 +25,25 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+class ZoneFile;
+
 class ZoneExtent {
  public:
   uint64_t start_;
   uint32_t length_;
   Zone* zone_;
+  ZoneFile* file_;
 
-  explicit ZoneExtent(uint64_t start, uint32_t length, Zone* zone);
+  explicit ZoneExtent(uint64_t start, uint32_t length, Zone* zone,
+                      ZoneFile* file)
+      : start_(start), length_(length), zone_(zone), file_(file) {
+    if (zone != nullptr) {
+      zone->SetZoneFile(file, start);
+    }
+  };
   Status DecodeFrom(Slice* input);
   void EncodeTo(std::string* output);
+  virtual ~ZoneExtent();
 };
 
 class ZoneFile {
@@ -48,7 +58,6 @@ class ZoneFile {
   uint64_t fileSize;
   std::string filename_;
   uint64_t file_id_;
-  int* level_;
 
   uint32_t nr_synced_extents_;
 
@@ -68,6 +77,8 @@ class ZoneFile {
 
   void SetActiveZone(Zone* zone) { active_zone_ = zone; }
   Zone* GetActiveZone() { return active_zone_; }
+  uint64_t GetExtentStart() { return extent_start_; }
+  uint64_t GetExtentFilePos() { return extent_filepos_; }
   uint32_t GetBlockSize() { return zbd_->GetBlockSize(); }
   std::vector<ZoneExtent*> GetExtents() { return extents_; }
   Env::WriteLifeTimeHint GetWriteLifeTimeHint() { return lifetime_; }
@@ -77,11 +88,10 @@ class ZoneFile {
   uint64_t GetOffset(ZoneExtent* target_extent);
   ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
   ZoneExtent* GetExtent(uint64_t extent_start);
-  void ReplaceExtent(ZoneExtent* target, ZoneExtent* top);
-  void RestoreExtent(ZoneExtent* extent, bool has_active);
+  ZoneExtent* ReplaceExtent(ZoneExtent* target, ZoneExtent* top);
+  void RestoreExtent(Zone* active_zone, uint64_t extent_start,
+                     uint64_t extent_filepos);
   void PushExtent();
-  void SetLevel(int* level) { level_ = level; }
-  int GetLevel() { return *level_; }
 
   void EncodeTo(std::string* output, uint32_t extent_start);
   void EncodeUpdateTo(std::string* output) {

@@ -43,6 +43,12 @@ void ZoneExtent::EncodeTo(std::string* output) {
   PutFixed32(output, length_);
 }
 
+ZoneExtent::~ZoneExtent() {
+  if (zone_ != nullptr) {
+    zone_->RemoveZoneFile(file_);
+  }
+}
+
 enum ZoneFileTag : uint32_t {
   kFileID = 1,
   kFileName = 2,
@@ -100,7 +106,7 @@ Status ZoneFile::DecodeFrom(Slice* input) {
           return Status::Corruption("ZoneFile", "Missing file size");
         break;
       case kExtent:
-        extent = new ZoneExtent(0, 0, nullptr);
+        extent = new ZoneExtent(0, 0, nullptr, this);
         GetLengthPrefixedSlice(input, &slice);
         s = extent->DecodeFrom(&slice);
         if (!s.ok()) {
@@ -134,7 +140,8 @@ Status ZoneFile::MergeUpdate(ZoneFile* update) {
     ZoneExtent* extent = update_extents[i];
     Zone* zone = extent->zone_;
     zone->used_capacity_ += extent->length_;
-    extents_.push_back(new ZoneExtent(extent->start_, extent->length_, zone));
+    extents_.push_back(
+        new ZoneExtent(extent->start_, extent->length_, zone, this));
   }
 
   MetadataSynced();
@@ -167,7 +174,6 @@ ZoneFile::~ZoneFile() {
 
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
-    zone->RemoveZoneFile(this);
     delete *e;
   }
   CloseWR();
@@ -295,12 +301,15 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
-void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
+ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
   assert(nullptr != target);
   assert(nullptr != top);
 
+  int64_t target_length = (int64_t)target->length_;
+
   std::vector<ZoneExtent*>::iterator target_pos;
   std::vector<ZoneExtent*> new_extents;
+  ZoneExtent* gc_target = nullptr;
   target_pos = find(extents_.begin(), extents_.end(), target);
   assert(extents_.end() != target_pos);
 
@@ -313,35 +322,38 @@ void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
     new_extents.insert(new_extents.begin(), extent);
   }
 
-  for (auto rit = new_extents.rbegin(); rit != new_extents.rend(); rit++) {
-    ZoneExtent* extent = *rit;
+  for (auto it = new_extents.begin(); it != new_extents.end(); it++) {
+    ZoneExtent* extent = *it;
     assert(nullptr != extent);
     extents_.insert(target_pos + 1, extent);
     extents_.pop_back();
     fileSize -= extent->length_;
+
+    if (target_length >= extent->length_) {
+      target_length -= extent->length_;
+    } else {
+      extent->length_ = target_length;
+      target_length = 0;
+    }
   }
+  if (target_length != 0) {
+    fprintf(stderr, "target error: %ld\n", target_length);
+  }
+  assert(target_length == 0);
+
   target_pos = find(extents_.begin(), extents_.end(), target);
+  assert(target_pos != extents_.end());
+  gc_target = *target_pos;
   extents_.erase(target_pos);
-  fprintf(zbd_->GetZoneLogFile(), "Replace it!\n");
-  fflush(zbd_->GetZoneLogFile());
+  return gc_target;
 }
 
 /* You must call this method after the ReplaceExtent() method calls */
-void ZoneFile::RestoreExtent(ZoneExtent* extent, bool has_active) {
-  assert(nullptr != extent);
-  assert(nullptr == active_zone_);
-  assert(nullptr != extent->zone_);
-
-  active_zone_ = extent->zone_;
-  extent_start_ = active_zone_->wp_;
-  extent_filepos_ = fileSize;
-
-  if (!has_active) {
-    active_zone_ = nullptr;
-  } else {
-    delete extents_.back();
-    extents_.pop_back();
-  }
+void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t /* extent_start */,
+                             uint64_t extent_filepos) {
+  assert(active_zone == nullptr);
+  extent_start_ = extents_.back()->start_;
+  extent_filepos_ = extent_filepos;
 }
 
 void ZoneFile::PushExtent() {
@@ -355,7 +367,7 @@ void ZoneFile::PushExtent() {
   if (length == 0) return;
 
   assert(length <= (active_zone_->wp_ - extent_start_));
-  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_));
+  extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_, this));
 
   active_zone_->used_capacity_ += length;
   extent_start_ = active_zone_->wp_;
@@ -376,8 +388,6 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
     }
     extent_start_ = active_zone_->wp_;
     extent_filepos_ = fileSize;
-
-    active_zone_->SetZoneFile(this, extent_start_);
   }
 
   while (left) {
@@ -391,19 +401,15 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
       }
       extent_start_ = active_zone_->wp_;
       extent_filepos_ = fileSize;
-
-      active_zone_->SetZoneFile(this, extent_start_);
     }
 
     wr_size = left;
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
-    fprintf(zbd_->GetZoneLogFile(),
-            "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10d\n",
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "WRITE",
             (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(),
-            wr_size, fileSize, GetLevel());
-    fflush(zbd_->GetZoneLogFile());
+            wr_size, fileSize);
     s = active_zone_->Append((char*)data + offset, wr_size);
     if (!s.ok()) {
       return s;
@@ -435,7 +441,6 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
   buffer_pos = 0;
 
   zoneFile_ = zoneFile;
-  zoneFile_->SetLevel(&level_);
 
   if (buffered) {
     int ret = posix_memalign((void**)&buffer, block_sz, buffer_sz);
