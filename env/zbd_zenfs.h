@@ -112,6 +112,8 @@ class ZonedBlockDevice {
                             std::shared_ptr<Logger> logger);
   virtual ~ZonedBlockDevice();
 
+  std::mutex *files_mtx_;
+
   IOStatus Open(bool readonly = false);
 
   Zone *GetIOZone(uint64_t offset);

@@ -77,7 +77,11 @@ class ZoneFile {
 
   void SetActiveZone(Zone* zone) { active_zone_ = zone; }
   Zone* GetActiveZone() { return active_zone_; }
+  void SetExtentStart(uint64_t extent_start) { extent_start_ = extent_start; }
   uint64_t GetExtentStart() { return extent_start_; }
+  void SetExtentFilePos(uint64_t extent_filepos) {
+    extent_filepos_ = extent_filepos;
+  }
   uint64_t GetExtentFilePos() { return extent_filepos_; }
   uint32_t GetBlockSize() { return zbd_->GetBlockSize(); }
   std::vector<ZoneExtent*> GetExtents() { return extents_; }

@@ -160,7 +160,6 @@ class ZenMetaLog {
 class ZenFS : public FileSystemWrapper {
   ZonedBlockDevice* zbd_;
   std::map<std::string, ZoneFile*> files_;
-  std::mutex files_mtx_;
   std::shared_ptr<Logger> logger_;
   std::atomic<uint64_t> next_file_id_;
 
@@ -225,6 +224,7 @@ class ZenFS : public FileSystemWrapper {
                  std::shared_ptr<Logger> logger);
   virtual ~ZenFS();
 
+  std::mutex files_mtx_;
   Status Mount();
   Status MkFS(std::string aux_fs_path, uint32_t finish_threshold);
 

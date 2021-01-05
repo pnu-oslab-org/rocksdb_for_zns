@@ -6,8 +6,6 @@
 
 #if !defined(ROCKSDB_LITE) && defined(OS_LINUX) && defined(LIBZBD)
 
-#include "env/fs_zenfs.h"
-
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "env/fs_zenfs.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "util/crc32c.h"
 
@@ -896,6 +895,8 @@ Status NewZenFS(FileSystem** fs, const std::string& bdevname) {
     delete zenFS;
     return s;
   }
+
+  zbd->files_mtx_ = &zenFS->files_mtx_;
 
   *fs = zenFS;
   return Status::OK();

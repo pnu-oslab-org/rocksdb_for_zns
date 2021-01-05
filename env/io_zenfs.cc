@@ -305,13 +305,25 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
   assert(nullptr != target);
   assert(nullptr != top);
 
-  int64_t target_length = (int64_t)target->length_;
-
   std::vector<ZoneExtent*>::iterator target_pos;
   std::vector<ZoneExtent*> new_extents;
   ZoneExtent* gc_target = nullptr;
   target_pos = find(extents_.begin(), extents_.end(), target);
   assert(extents_.end() != target_pos);
+
+  fprintf(zbd_->GetZoneLogFile(), "(target) %lu {start: %lu, length: %u}\n",
+          target->zone_->GetZoneNr(), target->start_, target->length_);
+  fflush(zbd_->GetZoneLogFile());
+
+  fprintf(zbd_->GetZoneLogFile(), "(top) %lu {start: %lu, length: %u}\n",
+          top->zone_->GetZoneNr(), top->start_, top->length_);
+  fflush(zbd_->GetZoneLogFile());
+
+  for (const auto extent : extents_) {
+    fprintf(zbd_->GetZoneLogFile(), "(amp) %lu {start: %lu, length: %u}\n",
+            extent->zone_->GetZoneNr(), extent->start_, extent->length_);
+    fflush(zbd_->GetZoneLogFile());
+  }
 
   for (auto rit = extents_.rbegin(); rit != extents_.rend(); rit++) {
     ZoneExtent* extent = *rit;
@@ -322,38 +334,39 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
     new_extents.insert(new_extents.begin(), extent);
   }
 
-  for (auto it = new_extents.begin(); it != new_extents.end(); it++) {
+  for (auto it = new_extents.rbegin(); it != new_extents.rend(); it++) {
     ZoneExtent* extent = *it;
     assert(nullptr != extent);
     extents_.insert(target_pos + 1, extent);
     extents_.pop_back();
     fileSize -= extent->length_;
-
-    if (target_length >= extent->length_) {
-      target_length -= extent->length_;
-    } else {
-      extent->length_ = target_length;
-      target_length = 0;
-    }
   }
-  if (target_length != 0) {
-    fprintf(stderr, "target error: %ld\n", target_length);
-  }
-  assert(target_length == 0);
 
   target_pos = find(extents_.begin(), extents_.end(), target);
   assert(target_pos != extents_.end());
   gc_target = *target_pos;
   extents_.erase(target_pos);
+
+  for (const auto extent : extents_) {
+    fprintf(zbd_->GetZoneLogFile(), "(after) %lu {start: %lu, length: %u}\n",
+            extent->zone_->GetZoneNr(), extent->start_, extent->length_);
+    fflush(zbd_->GetZoneLogFile());
+  }
+
   return gc_target;
 }
 
 /* You must call this method after the ReplaceExtent() method calls */
-void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t /* extent_start */,
+void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t extent_start,
                              uint64_t extent_filepos) {
   assert(active_zone == nullptr);
-  extent_start_ = extents_.back()->start_;
-  extent_filepos_ = extent_filepos;
+  if (active_zone != nullptr) {
+    extent_start_ = extent_start;
+    extent_filepos_ = extent_filepos;
+  } else {
+    extent_start_ = extents_.back()->start_;
+    extent_filepos_ = fileSize;
+  }
 }
 
 void ZoneFile::PushExtent() {
@@ -366,6 +379,14 @@ void ZoneFile::PushExtent() {
   length = fileSize - extent_filepos_;
   if (length == 0) return;
 
+  if (length > (active_zone_->wp_ - extent_start_)) {
+    fprintf(stderr,
+            "(push) {zone: %lu, length: %lu{fileSize: %lu, extent_filepos_: "
+            "%lu}, wp: %lu, "
+            "start: %lu\n",
+            active_zone_->GetZoneNr(), length, fileSize, extent_filepos_,
+            active_zone_->wp_, extent_start_);
+  }
   assert(length <= (active_zone_->wp_ - extent_start_));
   extents_.push_back(new ZoneExtent(extent_start_, length, active_zone_, this));
 
@@ -392,6 +413,10 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
 
   while (left) {
     if (active_zone_->capacity_ == 0) {
+      if (((fileSize - extent_filepos_) % zbd_->GetBlockSize()) != 0) {
+        fprintf(stderr, "%s: %lu %lu\n", filename_.c_str(), fileSize,
+                extent_filepos_);
+      }
       PushExtent();
 
       active_zone_->CloseWR();
@@ -410,6 +435,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "WRITE",
             (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(),
             wr_size, fileSize);
+    fflush(zbd_->GetZoneLogFile());
     s = active_zone_->Append((char*)data + offset, wr_size);
     if (!s.ok()) {
       return s;
