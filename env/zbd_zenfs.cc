@@ -38,6 +38,10 @@
 #define ZENFS_META_ZONES (3)
 
 #define ZONE_MIX
+#define ZONE_FILE_MIN_MIX (2)
+#define ZONE_GC_WATERMARK \
+  (70)  // if you don't have 70% of empty zones, GC started
+#define ZONE_GC_MAX_EXEC (5)  // execute gc count per allocate a zone
 
 #if defined(ZONE_MIX)
 #pragma message("ZONE_MIX mode enabled")
@@ -494,7 +498,7 @@ Zone *ZonedBlockDevice::ZoneSelectVictim() {
       continue;
     }
 
-    if (2 > z->file_map_.size()) {
+    if (ZONE_FILE_MIN_MIX > z->file_map_.size()) {
       continue;
     }
 
@@ -532,7 +536,7 @@ Zone *ZonedBlockDevice::ZoneSelectVictim() {
 
 ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
                                      Zone *z) {
-  char *gc_buffer = nullptr;
+  static char *gc_buffer = nullptr;
   int ret = 0;
   std::vector<std::pair<ZoneFile *, uint64_t> > gc_list;
   assert(0 != z->file_map_.size());
@@ -546,8 +550,10 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
   }
 
   assert(zone_sz_ % block_sz_ == 0);
-  ret = posix_memalign((void **)&gc_buffer, block_sz_, zone_sz_);
-  if (ret) gc_buffer = nullptr;
+  if (gc_buffer == nullptr) {
+    ret = posix_memalign((void **)&gc_buffer, block_sz_, zone_sz_);
+    if (ret) gc_buffer = nullptr;
+  }
   assert(nullptr != gc_buffer);
 
   for (const auto item : gc_list) {
@@ -626,20 +632,21 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
     }
     assert(nullptr == file->GetActiveZone());
 
-    gc_target = file->ReplaceExtent(target, top);
+    gc_target = file->ReplaceExtent(target, top, &active_zone);
     assert(nullptr != gc_target);
-    file->RestoreExtent(file->GetActiveZone(), extent_start, extent_filepos);
+    file->RestoreExtent(file->GetActiveZone(), extent_start, extent_filepos,
+                        file_size);
     if (file->GetFileSize() != file_size) {
-      fprintf(stderr, "file size doesn't match %lu != %lu\n",
-              file->GetFileSize(), file_size);
+      fprintf(zone_log_file_, "(%s) file size doesn't match %lu != %lu\n",
+              file->GetFilename().c_str(), file->GetFileSize(), file_size);
     }
-    assert(file->GetFileSize() == file_size);
     delete gc_target;
+    file->SetActiveZone(active_zone);
   }
   z->used_capacity_ = 0;
   assert(IOStatus::OK() == z->Reset());
 
-  free(gc_buffer);
+  /* TODO: whenever we have to free the gc_buffer */
   return ZoneGcState::NORMAL_EXIT;
 }
 
@@ -752,6 +759,7 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
   Zone *gc_target = nullptr;
 
   unsigned int best_diff;
+  uint64_t cnt = ZONE_GC_MAX_EXEC;
   int new_zone;
   /* Make sure we are below the zone open limit */
   WaitUntilZoneOpenAvail();
@@ -776,12 +784,17 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
   }
 
   /* TODO: you must change while statement */
-  if (is_gc && (files_mtx_ !=
-                nullptr) /*&& (GetEmptyZones() * 10 <= GetNrZones() * 9)*/) {
+  while (is_gc && (files_mtx_ != nullptr) &&
+         (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK) &&
+         cnt > 0) {
     files_mtx_->lock();
     gc_target = ZoneSelectVictim();
     if (gc_target) {
       (void)ZoneGc(lifetime, gc_target);
+      cnt--;
+    } else {
+      files_mtx_->unlock();
+      break;
     }
     files_mtx_->unlock();
   }

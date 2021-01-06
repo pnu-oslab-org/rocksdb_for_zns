@@ -92,9 +92,10 @@ class ZoneFile {
   uint64_t GetOffset(ZoneExtent* target_extent);
   ZoneExtent* GetExtent(uint64_t file_offset, uint64_t* dev_offset);
   ZoneExtent* GetExtent(uint64_t extent_start);
-  ZoneExtent* ReplaceExtent(ZoneExtent* target, ZoneExtent* top);
+  ZoneExtent* ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
+                            Zone** active_zone);
   void RestoreExtent(Zone* active_zone, uint64_t extent_start,
-                     uint64_t extent_filepos);
+                     uint64_t extent_filepos, uint64_t file_size);
   void PushExtent();
 
   void EncodeTo(std::string* output, uint32_t extent_start);

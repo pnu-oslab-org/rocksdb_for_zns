@@ -301,7 +301,8 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
-ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
+ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
+                                    Zone** active_zone) {
   assert(nullptr != target);
   assert(nullptr != top);
 
@@ -347,6 +348,14 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
   gc_target = *target_pos;
   extents_.erase(target_pos);
 
+  if (*active_zone != nullptr) {
+    if (top->zone_ != *active_zone) {
+      extents_.pop_back();
+    } else {
+      *active_zone = extents_.back()->zone_;
+    }
+  }
+
   for (const auto extent : extents_) {
     fprintf(zbd_->GetZoneLogFile(), "(after) %lu {start: %lu, length: %u}\n",
             extent->zone_->GetZoneNr(), extent->start_, extent->length_);
@@ -358,11 +367,14 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
 
 /* You must call this method after the ReplaceExtent() method calls */
 void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t extent_start,
-                             uint64_t extent_filepos) {
+                             uint64_t extent_filepos, uint64_t file_size) {
   assert(active_zone == nullptr);
   if (active_zone != nullptr) {
     extent_start_ = extent_start;
     extent_filepos_ = extent_filepos;
+    fprintf(zbd_->GetZoneLogFile(), "(zone: %lu) file size resize %lu->%lu\n",
+            active_zone->GetZoneNr(), fileSize, file_size);
+    fileSize = file_size;
   } else {
     extent_start_ = extents_.back()->start_;
     extent_filepos_ = fileSize;
