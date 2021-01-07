@@ -312,6 +312,7 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
   target_pos = find(extents_.begin(), extents_.end(), target);
   assert(extents_.end() != target_pos);
 
+#ifdef ZONE_CUSTOM_DEBUG
   fprintf(zbd_->GetZoneLogFile(), "(target) %lu {start: %lu, length: %u}\n",
           target->zone_->GetZoneNr(), target->start_, target->length_);
   fflush(zbd_->GetZoneLogFile());
@@ -325,6 +326,7 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
             extent->zone_->GetZoneNr(), extent->start_, extent->length_);
     fflush(zbd_->GetZoneLogFile());
   }
+#endif
 
   for (auto rit = extents_.rbegin(); rit != extents_.rend(); rit++) {
     ZoneExtent* extent = *rit;
@@ -356,11 +358,13 @@ ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
     }
   }
 
+#ifdef ZONE_CUSTOM_DEBUG
   for (const auto extent : extents_) {
     fprintf(zbd_->GetZoneLogFile(), "(after) %lu {start: %lu, length: %u}\n",
             extent->zone_->GetZoneNr(), extent->start_, extent->length_);
     fflush(zbd_->GetZoneLogFile());
   }
+#endif
 
   return gc_target;
 }
@@ -372,8 +376,10 @@ void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t extent_start,
   if (active_zone != nullptr) {
     extent_start_ = extent_start;
     extent_filepos_ = extent_filepos;
+#ifdef ZONE_CUSTOM_DEBUG
     fprintf(zbd_->GetZoneLogFile(), "(zone: %lu) file size resize %lu->%lu\n",
             active_zone->GetZoneNr(), fileSize, file_size);
+#endif
     fileSize = file_size;
   } else {
     extent_start_ = extents_.back()->start_;
@@ -443,11 +449,13 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
     wr_size = left;
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
+#ifdef ZONE_CUSTOM_DEBUG
     fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "WRITE",
             (unsigned long)0, active_zone_->GetZoneNr(), filename_.c_str(),
             wr_size, fileSize);
     fflush(zbd_->GetZoneLogFile());
+#endif
     s = active_zone_->Append((char*)data + offset, wr_size);
     if (!s.ok()) {
       return s;

@@ -105,7 +105,8 @@ class ZonedBlockDevice {
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
-  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, bool is_gc);
+  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, ZoneFile *file,
+                        bool is_gc);
 
  public:
   explicit ZonedBlockDevice(std::string bdevname,
@@ -118,7 +119,8 @@ class ZonedBlockDevice {
 
   Zone *GetIOZone(uint64_t offset);
 
-  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, bool is_gc);
+  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *file,
+                     bool is_gc);
   Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file,
                      Zone *before_zone, bool is_gc);
   Zone *AllocateMetaZone();
@@ -154,8 +156,9 @@ class ZonedBlockDevice {
                                  bool finish_condition, Zone **callback_victim);
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
                         Zone **allocated_zone, Env::WriteLifeTimeHint lifetime);
-  int GetAlreadyOpenZone(Zone **allocated_zone,
+  int GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
                          Env::WriteLifeTimeHint lifetime);
+  std::string GetZoneFileExt(const std::string filename);
 };
 
 }  // namespace ROCKSDB_NAMESPACE
