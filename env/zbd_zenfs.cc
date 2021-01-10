@@ -753,7 +753,7 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
 
   for (const auto z : io_zones) {
     if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
-#if defined(ZONE_HOT_COLD_MIX)
+#if defined(ZONE_HOT_COLD_SEP)
       (void)best_diff;
       (void)lifetime;
 
@@ -798,6 +798,8 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
   unsigned int best_diff;
   uint64_t cnt = ZONE_GC_MAX_EXEC;
   int new_zone;
+  const bool is_trigger =
+      (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER);
   /* Make sure we are below the zone open limit */
   WaitUntilZoneOpenAvail();
 
@@ -806,17 +808,20 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
           (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
           GetNrZones(), GetEmptyZones());
   fflush(zone_log_file_);
+
+  if (is_trigger) {
+    fprintf(zone_log_file_, "%-10ld%-8s\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "TRIGGER");
+  }
 #endif
 
   for (const auto z : io_zones) {
     bool reset_cond, finish_cond;
 #if defined(ZONE_MIX)
-    reset_cond = (!z->IsUsed() &&
-                  (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER));
+    reset_cond = (!z->IsUsed() && is_trigger);
     finish_cond = (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
 #else
-    reset_cond = (!z->IsUsed() &&
-                  (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER));
+    reset_cond = (!z->IsUsed() && is_trigger);
     finish_cond = (z->capacity_ > 0);
 #endif
 

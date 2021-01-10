@@ -33,12 +33,12 @@
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
 
-// #define ZONE_CUSTOM_DEBUG
+#define ZONE_CUSTOM_DEBUG
 
 #define ZONE_MIX
-// #define ZONE_HOT_COLD_MIX
+// #define ZONE_HOT_COLD_SEP
 
-#define ZONE_RESET_TRIGGER (75)  // Empty Zone이 30% 이하일 때
+#define ZONE_RESET_TRIGGER (10)  // Empty Zone이 10% 이하일 때
 
 #define ZONE_FILE_MIN_MIX (1)
 #define ZONE_GC_WATERMARK \
@@ -46,16 +46,22 @@
 #define ZONE_GC_MAX_EXEC (5)  // execute gc count per allocate a zone
 #define ZONE_GC_ENABLE (0)    // is gc enable
 
+#if defined(ZONE_CUSTOM_DEBUG)
+#pragma message("ZONE CUSTOM DEBUG mode enabled")
+#else
+#pragma message("ZONE CUSTOM DEBUG mode disabled")
+#endif
+
 #if ZONE_GC_ENABLE == 1
 #pragma message("ZONE GC mode enabled")
 #else
 #pragma message("ZONE GC mode disabled")
 #endif
 
-#if defined(ZONE_HOT_COLD_MIX)
-#pragma message("ZONE_HOT_COLD_MIX mode enabled")
+#if defined(ZONE_HOT_COLD_SEP)
+#pragma message("ZONE_HOT_COLD_SEP mode enabled")
 #else
-#pragma message("ZONE_HOT_COLD_MIX mode disabled")
+#pragma message("ZONE_HOT_COLD_SEP mode disabled")
 #endif
 
 #if defined(ZONE_MIX)
