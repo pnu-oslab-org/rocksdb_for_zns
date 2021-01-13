@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -222,6 +223,7 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   uint64_t i = 0;
   uint64_t m = 0;
   int ret;
+  std::stringstream sstr;
 
   read_f_ = zbd_open(filename_.c_str(), O_RDONLY, &info);
   if (read_f_ < 0) {
@@ -255,7 +257,13 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   zone_sz_ = info.zone_size;
   nr_zones_ = info.nr_zones;
 
-  zone_log_file_ = fopen("zone.log", "w");
+#if defined(ZONE_HOT_COLD_SEP)
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_sep.log";
+#else
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_no_sep.log";
+#endif
+
+  zone_log_file_ = fopen(sstr.str().c_str(), "w");
   assert(NULL != zone_log_file_);
 #ifdef ZONE_CUSTOM_DEBUG
   fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s\n", "TIME(ms)",
@@ -754,6 +762,7 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
   for (const auto z : io_zones) {
     if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
 #if defined(ZONE_HOT_COLD_SEP)
+#pragma message("HOT COLD SEP CODE ENABLE")
       (void)best_diff;
       (void)lifetime;
 
@@ -812,6 +821,7 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
   if (is_trigger) {
     fprintf(zone_log_file_, "%-10ld%-8s\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "TRIGGER");
+    fflush(zone_log_file_);
   }
 #endif
 
