@@ -52,6 +52,7 @@ Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
+  level_bits_.reset();
   if (!(zbd_zone_full(z) || zbd_zone_offline(z) || zbd_zone_rdonly(z)))
     capacity_ = zbd_zone_capacity(z) - (zbd_zone_wp(z) - zbd_zone_start(z));
 }
@@ -137,6 +138,10 @@ IOStatus Zone::Reset() {
 
   file_map_.clear();
 
+  nr_file_ = 0;
+  total_lifetime_ = 0;
+  level_bits_.reset();
+
   return IOStatus::OK();
 }
 
@@ -160,6 +165,15 @@ IOStatus Zone::Close() {
   size_t zone_sz = zbd_->GetZoneSize();
   int fd = zbd_->GetWriteFD();
   int ret;
+
+#ifdef ZONE_CUSTOM_DEBUG
+  if (zbd_->GetZoneLogFile()) {
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8lf\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "MIX", 0,
+            GetZoneNr(), (double)(level_bits_.count()));
+    fflush(zbd_->GetZoneLogFile());
+  }
+#endif
 
   assert(!open_for_write_);
 
@@ -266,8 +280,9 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   zone_log_file_ = fopen(sstr.str().c_str(), "w");
   assert(NULL != zone_log_file_);
 #ifdef ZONE_CUSTOM_DEBUG
-  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s\n", "TIME(ms)",
-          "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE");
+  fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)",
+          "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE",
+          "LEVEL");
   fflush(zone_log_file_);
 #endif
 
@@ -668,16 +683,17 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
 
   if (reset_condition) {
     if (!z->IsFull()) active_io_zones_--;
+#ifdef ZONE_CUSTOM_DEBUG
+    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-8lf\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
+            z->GetZoneNr(), (double)(z->total_lifetime_ / z->nr_file_));
+    fflush(zone_log_file_);
+#endif
     s = z->Reset();
+    assert(s.ok());
     if (!s.ok()) {
       Debug(logger_, "Failed resetting zone !");
     }
-#ifdef ZONE_CUSTOM_DEBUG
-    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n",
-            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
-            z->GetZoneNr());
-    fflush(zone_log_file_);
-#endif
     return ZoneGcState::DO_RESET;
   }
 
@@ -889,6 +905,11 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
     allocated_zone = AllocateZoneRaw(lifetime, file, is_gc);
   }
 
+  allocated_zone->nr_file_ += 1;
+  allocated_zone->total_lifetime_ =
+      (allocated_zone->total_lifetime_ + file->GetWriteLifeTimeHint());
+  allocated_zone->level_bits_.set(file->GetWriteLifeTimeHint(), true);
+
   return allocated_zone;
 }
 
@@ -903,16 +924,18 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
   zone = AllocateZone(lifetime, zone_file, is_gc);
 #ifdef ZONE_CUSTOM_DEBUG
   if (!before_zone) {
-    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu\n",
+    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu%-10u\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "NEW", 0,
             zone->GetZoneNr(), zone_file->GetFilename().c_str(), 0,
-            zone_file->GetFileSize());
+            zone_file->GetFileSize(),
+            (unsigned int)zone_file->GetWriteLifeTimeHint());
     fflush(zone_log_file_);
   } else {
-    fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu\n",
+    fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8lu%-45s%-10u%-10lu%-10u\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "EXHAUST",
             before_zone->GetZoneNr(), zone->GetZoneNr(),
-            zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize());
+            zone_file->GetFilename().c_str(), 0, zone_file->GetFileSize(),
+            (unsigned int)zone_file->GetWriteLifeTimeHint());
     fflush(zone_log_file_);
   }
 #else

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bitset>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -38,7 +39,7 @@
 #define ZONE_MIX
 // #define ZONE_HOT_COLD_SEP
 
-#define ZONE_RESET_TRIGGER (10)  // Empty Zone이 10% 이하일 때
+#define ZONE_RESET_TRIGGER (100)  // Empty Zone이 10% 이하일 때
 
 #define ZONE_FILE_MIN_MIX (1)
 #define ZONE_GC_WATERMARK \
@@ -92,6 +93,9 @@ class Zone {
   uint64_t wp_;
   bool open_for_write_;
   Env::WriteLifeTimeHint lifetime_;
+  double total_lifetime_;
+  uint64_t nr_file_;
+  std::bitset<16> level_bits_;
   std::atomic<long> used_capacity_;
   std::unordered_map<ZoneFile *, uint64_t> file_map_;
 
