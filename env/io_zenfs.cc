@@ -174,9 +174,17 @@ ZoneFile::~ZoneFile() {
 
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
+
+    if (zbd_->GetZoneLogFile()) {
+      fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8s%-40s%-8u%-8lu\n",
+              (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
+              "PEND", GetFilename().c_str(), GetWriteLifeTimeHint(),
+              zone->GetZoneNr());
+    }
     delete *e;
   }
   CloseWR();
+  fflush(zbd_->GetZoneLogFile());
 }
 
 void ZoneFile::CloseWR() {

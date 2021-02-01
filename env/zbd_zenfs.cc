@@ -67,6 +67,7 @@ void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
   assert(nullptr != file);
 
   file_map_.insert({file, extent_start});
+  file_meta_map_.insert({file->GetFilename(), file->GetWriteLifeTimeHint()});
 }
 
 uint64_t Zone::GetZoneExtent(ZoneFile *file) {
@@ -137,6 +138,7 @@ IOStatus Zone::Reset() {
   lifetime_ = Env::WLTH_NOT_SET;
 
   file_map_.clear();
+  file_meta_map_.clear();
 
   nr_file_ = 0;
   total_lifetime_ = 0;
@@ -166,6 +168,13 @@ IOStatus Zone::Close() {
   int fd = zbd_->GetWriteFD();
   int ret;
 
+  assert(!open_for_write_);
+
+  if (!(IsEmpty() || IsFull())) {
+    ret = zbd_close_zones(fd, start_, zone_sz);
+    if (ret) return IOStatus::IOError("Zone close failed\n");
+  }
+
 #ifdef ZONE_CUSTOM_DEBUG
   if (zbd_->GetZoneLogFile()) {
     fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8lf\n",
@@ -174,13 +183,6 @@ IOStatus Zone::Close() {
     fflush(zbd_->GetZoneLogFile());
   }
 #endif
-
-  assert(!open_for_write_);
-
-  if (!(IsEmpty() || IsFull())) {
-    ret = zbd_close_zones(fd, start_, zone_sz);
-    if (ret) return IOStatus::IOError("Zone close failed\n");
-  }
 
   return IOStatus::OK();
 }
@@ -687,6 +689,15 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
     fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-8lf\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
             z->GetZoneNr(), (double)(z->total_lifetime_ / z->nr_file_));
+
+    for (auto item : z->file_meta_map_) {
+      if (zone_log_file_) {
+        fprintf(zone_log_file_, "%-10ld%-8s%-8s%-40s%-8u%-8lu%-16lu%-16lu\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
+                "DEL", item.first.c_str(), item.second, z->GetZoneNr(), z->wp_,
+                z->start_ + z->max_capacity_);
+      }
+    }
     fflush(zone_log_file_);
 #endif
     s = z->Reset();
@@ -862,6 +873,11 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
     files_mtx_->lock();
     gc_target = ZoneSelectVictim();
     if (gc_target) {
+      if (zone_log_file_) {
+        fprintf(zone_log_file_, "%-10ld%-8s\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC");
+        fflush(zone_log_file_);
+      }
       (void)ZoneGc(lifetime, gc_target);
       cnt--;
     } else {
