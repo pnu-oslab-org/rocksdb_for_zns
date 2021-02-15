@@ -168,18 +168,21 @@ ZoneFile::~ZoneFile() {
   for (auto e = std::begin(extents_); e != std::end(extents_); ++e) {
     Zone* zone = (*e)->zone_;
 
-    assert(zone && zone->used_capacity_ >= (*e)->length_);
-    zone->used_capacity_ -= (*e)->length_;
-
 #ifdef ZONE_CUSTOM_DEBUG
     if (zbd_->GetZoneLogFile()) {
-      fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8s%-40s%-8u%-8lu\n",
+      long cap = zone->used_capacity_;
+      fprintf(zbd_->GetZoneLogFile(),
+              "%-10ld%-8s%-8s%-40s%-8u%-8lu%-12ld%-12u\n",
               (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
               "PEND", GetFilename().c_str(), GetWriteLifeTimeHint(),
-              zone->GetZoneNr());
+              zone->GetZoneNr(), cap, (*e)->length_);
     }
     fflush(zbd_->GetZoneLogFile());
 #endif
+
+    assert(zone && zone->used_capacity_ >= (*e)->length_);
+    zone->used_capacity_ -= (*e)->length_;
+
     delete *e;
   }
   CloseWR();

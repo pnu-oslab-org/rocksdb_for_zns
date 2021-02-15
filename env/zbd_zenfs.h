@@ -36,7 +36,7 @@
 #define ZONE_CUSTOM_DEBUG
 
 #define ZONE_MIX
-#define ZONE_HOT_COLD_SEP
+// #define ZONE_HOT_COLD_SEP
 
 #define ZONE_RESET_TRIGGER (30)  // Empty Zone이 10% 이하일 때
 

@@ -500,7 +500,7 @@ void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
 }
 
 bool ZonedBlockDevice::ZoneValidationCheck(Zone *z) {
-  if (!z->IsUsed() || z->IsEmpty() || !z->IsFull()) {
+  if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed())) {
     return false;
   }
 
@@ -607,14 +607,16 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
     ZoneExtent *target_extent = nullptr;
 
     ZoneFile *file = item.first;
+    uint64_t file_size = 0;
     Slice result;
 
     assert(nullptr != file);
 
     file->PushExtent();
-    if (file->GetActiveZone()) {
-      file->SetActiveZone(nullptr);
-    }
+    file->CloseWR();
+
+    file_size = file->GetFileSize();
+
     original_vector_back = file->GetExtents().back();
 
     result = ReadDataFromExtent(item, gc_buffer_, &target_extent);
@@ -623,6 +625,7 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
     assert(s == IOStatus::OK());
 
     file->ReplaceExtent(target_extent, original_vector_back);
+    assert(file->GetFileSize() == file_size);
 
     delete target_extent;
   }
