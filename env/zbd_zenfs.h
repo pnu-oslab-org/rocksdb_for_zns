@@ -37,15 +37,14 @@
 #define ZONE_CUSTOM_DEBUG
 
 #define ZONE_MIX
-// #define ZONE_HOT_COLD_SEP
+//#define ZONE_HOT_COLD_SEP
 
-#define ZONE_RESET_TRIGGER (10)  // Empty Zone이 10% 이하일 때
+#define ZONE_RESET_TRIGGER (30)  // Empty Zone이 10% 이하일 때
 
 #define ZONE_FILE_MIN_MIX (1)
 #define ZONE_GC_WATERMARK \
-  (70)  // if you don't have 70% of empty zones, GC started
-#define ZONE_GC_MAX_EXEC (5)  // execute gc count per allocate a zone
-#define ZONE_GC_ENABLE (1)    // is gc enable
+  (ZONE_RESET_TRIGGER)      // if you don't have 30% of empty zones, GC started
+#define ZONE_GC_ENABLE (1)  // is gc enable
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")
@@ -126,7 +125,7 @@ class ZonedBlockDevice {
   uint32_t zone_sz_;
   uint32_t nr_zones_;
   std::vector<Zone *> io_zones;
-  std::mutex io_zones_mtx;
+  std::recursive_mutex io_zones_mtx;
   std::vector<Zone *> meta_zones;
   int read_f_;
   int read_direct_f_;
@@ -139,9 +138,9 @@ class ZonedBlockDevice {
   std::atomic<long> open_io_zones_;
   std::condition_variable zone_resources_;
   std::mutex zone_resources_mtx_; /* Protects active/open io zones */
+  std::mutex gc_buffer_mtx_;
 
   FILE *zone_log_file_;
-
   char *gc_buffer_;
 
   unsigned int max_nr_active_io_zones_;
@@ -190,9 +189,18 @@ class ZonedBlockDevice {
   void NotifyIOZoneFull();
   void NotifyIOZoneClosed();
 
+  long GetOpenIOZone() { return open_io_zones_; };
+  unsigned int GetMaxNrOpenIOZone() { return max_nr_open_io_zones_; };
+
  private:
+  Slice ReadDataFromExtent(const std::pair<ZoneFile *, uint64_t> &item,
+                           char *scratch, ZoneExtent **target_extent);
+  IOStatus CopyDataToFile(const std::pair<ZoneFile *, uint64_t> &item,
+                          Slice &source, char *scratch);
+  void GenerateGcList(std::vector<std::pair<ZoneFile *, uint64_t> > *gc_list,
+                      const std::unordered_map<ZoneFile *, uint64_t> &file_map);
   void WaitUntilZoneOpenAvail();
-  Zone *ZoneSelectVictim();
+  void ZoneSelectVictim(std::vector<Zone *> *victim_list);
   ZoneGcState ZoneGc(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);

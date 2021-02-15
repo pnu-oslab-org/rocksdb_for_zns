@@ -175,16 +175,18 @@ ZoneFile::~ZoneFile() {
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
 
+#ifdef ZONE_CUSTOM_DEBUG
     if (zbd_->GetZoneLogFile()) {
       fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8s%-40s%-8u%-8lu\n",
               (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
               "PEND", GetFilename().c_str(), GetWriteLifeTimeHint(),
               zone->GetZoneNr());
     }
+    fflush(zbd_->GetZoneLogFile());
+#endif
     delete *e;
   }
   CloseWR();
-  fflush(zbd_->GetZoneLogFile());
 }
 
 void ZoneFile::CloseWR() {
@@ -309,90 +311,27 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
-ZoneExtent* ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top,
-                                    Zone** active_zone) {
-  assert(nullptr != target);
-  assert(nullptr != top);
+void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
+  auto remove_pos = find(extents_.begin(), extents_.end(), target);
+  auto top_pos = find(extents_.begin(), extents_.end(), top);
 
-  std::vector<ZoneExtent*>::iterator target_pos;
-  std::vector<ZoneExtent*> new_extents;
-  ZoneExtent* gc_target = nullptr;
-  target_pos = find(extents_.begin(), extents_.end(), target);
-  assert(extents_.end() != target_pos);
+  assert(remove_pos != extents_.end());
+  assert(top_pos != extents_.end());
 
-#ifdef ZONE_CUSTOM_DEBUG
-  fprintf(zbd_->GetZoneLogFile(), "(target) %lu {start: %lu, length: %u}\n",
-          target->zone_->GetZoneNr(), target->start_, target->length_);
-  fflush(zbd_->GetZoneLogFile());
+  std::vector<ZoneExtent*> temp_extents;
+  std::copy(top_pos + 1, extents_.end(), std::back_inserter(temp_extents));
 
-  fprintf(zbd_->GetZoneLogFile(), "(top) %lu {start: %lu, length: %u}\n",
-          top->zone_->GetZoneNr(), top->start_, top->length_);
-  fflush(zbd_->GetZoneLogFile());
-
-  for (const auto extent : extents_) {
-    fprintf(zbd_->GetZoneLogFile(), "(amp) %lu {start: %lu, length: %u}\n",
-            extent->zone_->GetZoneNr(), extent->start_, extent->length_);
-    fflush(zbd_->GetZoneLogFile());
-  }
-#endif
-
-  for (auto rit = extents_.rbegin(); rit != extents_.rend(); rit++) {
-    ZoneExtent* extent = *rit;
-    assert(nullptr != extent);
-    if (extent == top) {
-      break;
-    }
-    new_extents.insert(new_extents.begin(), extent);
-  }
-
-  for (auto it = new_extents.rbegin(); it != new_extents.rend(); it++) {
+  for (auto it = top_pos + 1; it != extents_.end(); it++) {
     ZoneExtent* extent = *it;
-    assert(nullptr != extent);
-    extents_.insert(target_pos + 1, extent);
-    extents_.pop_back();
     fileSize -= extent->length_;
   }
 
-  target_pos = find(extents_.begin(), extents_.end(), target);
-  assert(target_pos != extents_.end());
-  gc_target = *target_pos;
-  extents_.erase(target_pos);
+  extents_.erase(top_pos + 1, extents_.end());
+  extents_.insert(remove_pos + 1, temp_extents.begin(), temp_extents.end());
+  extents_.erase(remove_pos);
 
-  if (*active_zone != nullptr) {
-    if (top->zone_ != *active_zone) {
-      extents_.pop_back();
-    } else {
-      *active_zone = extents_.back()->zone_;
-    }
-  }
-
-#ifdef ZONE_CUSTOM_DEBUG
-  for (const auto extent : extents_) {
-    fprintf(zbd_->GetZoneLogFile(), "(after) %lu {start: %lu, length: %u}\n",
-            extent->zone_->GetZoneNr(), extent->start_, extent->length_);
-    fflush(zbd_->GetZoneLogFile());
-  }
-#endif
-
-  return gc_target;
-}
-
-/* You must call this method after the ReplaceExtent() method calls */
-void ZoneFile::RestoreExtent(Zone* active_zone, uint64_t extent_start,
-                             uint64_t extent_filepos, uint64_t file_size) {
-  assert(active_zone == nullptr);
-  if (active_zone != nullptr) {
-    extent_start_ = extent_start;
-    extent_filepos_ = extent_filepos;
-#ifdef ZONE_CUSTOM_DEBUG
-    fprintf(zbd_->GetZoneLogFile(), "(zone: %lu) file size resize %lu->%lu\n",
-            active_zone->GetZoneNr(), fileSize, file_size);
-#endif
-    fileSize = file_size;
-  } else {
-    extent_start_ = extents_.back()->start_;
-    extent_filepos_ = fileSize;
-  }
+  extent_start_ = extents_.back()->start_;
+  extent_filepos_ = fileSize;
 }
 
 void ZoneFile::PushExtent() {
