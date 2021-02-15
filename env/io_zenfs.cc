@@ -43,11 +43,7 @@ void ZoneExtent::EncodeTo(std::string* output) {
   PutFixed32(output, length_);
 }
 
-ZoneExtent::~ZoneExtent() {
-  if (zone_ != nullptr) {
-    zone_->RemoveZoneFile(file_);
-  }
-}
+ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_); }
 
 enum ZoneFileTag : uint32_t {
   kFileID = 1,
@@ -361,14 +357,13 @@ void ZoneFile::PushExtent() {
 }
 
 /* Assumes that data and size are block aligned */
-IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
-                          bool is_gc = true) {
+IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
   uint32_t left = data_size;
   uint32_t wr_size, offset = 0;
   IOStatus s;
 
   if (active_zone_ == NULL) {
-    active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL, is_gc);
+    active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL);
     if (!active_zone_) {
       return IOStatus::NoSpace("Zone allocation failure\n");
     }
@@ -385,7 +380,7 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size,
       PushExtent();
 
       active_zone_->CloseWR();
-      active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_, is_gc);
+      active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_);
       if (!active_zone_) {
         return IOStatus::NoSpace("Zone allocation failure\n");
       }

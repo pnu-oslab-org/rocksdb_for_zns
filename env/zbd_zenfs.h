@@ -27,7 +27,6 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,14 +36,15 @@
 #define ZONE_CUSTOM_DEBUG
 
 #define ZONE_MIX
-//#define ZONE_HOT_COLD_SEP
+#define ZONE_HOT_COLD_SEP
 
 #define ZONE_RESET_TRIGGER (30)  // Empty Zone이 10% 이하일 때
 
-#define ZONE_FILE_MIN_MIX (1)
+#define ZONE_FILE_MIN_MIX (2)
 #define ZONE_GC_WATERMARK \
   (ZONE_RESET_TRIGGER)      // if you don't have 30% of empty zones, GC started
 #define ZONE_GC_ENABLE (1)  // is gc enable
+#define ZONE_INVALID_FILE (std::numeric_limits<uint64_t>::max())
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")
@@ -93,11 +93,10 @@ class Zone {
   bool open_for_write_;
   Env::WriteLifeTimeHint lifetime_;
   double total_lifetime_;
-  uint64_t nr_file_;
   std::bitset<16> level_bits_;
   std::atomic<long> used_capacity_;
-  std::unordered_map<ZoneFile *, uint64_t> file_map_;
-  std::unordered_map<std::string, int> file_meta_map_;
+  std::vector<std::pair<ZoneFile *, uint64_t>> file_map_;
+  bool has_meta_;
 
   IOStatus Reset();
   IOStatus Finish();
@@ -111,7 +110,6 @@ class Zone {
   uint64_t GetCapacityLeft();
 
   void SetZoneFile(ZoneFile *file, uint64_t extent_start);
-  uint64_t GetZoneExtent(ZoneFile *file);
   void RemoveZoneFile(ZoneFile *file);
   void PrintZoneFiles(FILE *fp);
 
@@ -146,8 +144,7 @@ class ZonedBlockDevice {
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
-  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, ZoneFile *file,
-                        bool is_gc);
+  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, ZoneFile *file);
 
  public:
   explicit ZonedBlockDevice(std::string bdevname,
@@ -160,10 +157,9 @@ class ZonedBlockDevice {
 
   Zone *GetIOZone(uint64_t offset);
 
-  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *file,
-                     bool is_gc);
+  Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *file);
   Zone *AllocateZone(Env::WriteLifeTimeHint lifetime, ZoneFile *zone_file,
-                     Zone *before_zone, bool is_gc);
+                     Zone *before_zone);
   Zone *AllocateMetaZone();
 
   uint64_t GetFreeSpace();
@@ -197,9 +193,8 @@ class ZonedBlockDevice {
                            char *scratch, ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const std::pair<ZoneFile *, uint64_t> &item,
                           Slice &source, char *scratch);
-  void GenerateGcList(std::vector<std::pair<ZoneFile *, uint64_t> > *gc_list,
-                      const std::unordered_map<ZoneFile *, uint64_t> &file_map);
   void WaitUntilZoneOpenAvail();
+  bool ZoneValidationCheck(Zone *z);
   void ZoneSelectVictim(std::vector<Zone *> *victim_list);
   ZoneGcState ZoneGc(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,

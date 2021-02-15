@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -48,7 +49,8 @@ Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
       start_(zbd_zone_start(z)),
       max_capacity_(zbd_zone_capacity(z)),
       wp_(zbd_zone_wp(z)),
-      open_for_write_(false) {
+      open_for_write_(false),
+      has_meta_(false) {
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
@@ -66,25 +68,19 @@ uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
 void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
   assert(nullptr != file);
 
-  file_map_.insert({file, extent_start});
-  file_meta_map_.insert({file->GetFilename(), file->GetWriteLifeTimeHint()});
-}
-
-uint64_t Zone::GetZoneExtent(ZoneFile *file) {
-  uint64_t extent_start = ZONE_EXTENT_FIND_FAIL;
-  auto item = file_map_.find(file);
-  if (item != file_map_.end()) {
-    extent_start = item->second;
+  bool is_sst = file->GetFilename().find("sst") == std::string::npos;
+  bool is_log = file->GetFilename().find("log") == std::string::npos;
+  if (!is_sst && !is_log) {
+    has_meta_ = true;
   }
-  return extent_start;
+  file_map_.push_back(std::make_pair<>(file, extent_start));
 }
 
 void Zone::RemoveZoneFile(ZoneFile *file) {
-  assert(nullptr != file);
-
-  auto item = file_map_.find(file);
-  if (item != file_map_.end()) {
-    file_map_.erase(item);
+  for (auto it = file_map_.begin(); it != file_map_.end(); it++) {
+    if (it->first == file) {
+      it->second = ZONE_INVALID_FILE;
+    }
   }
 }
 
@@ -92,6 +88,9 @@ void Zone::PrintZoneFiles(FILE *fp) {
   assert(nullptr != fp);
 
   for (const auto item : file_map_) {
+    if (item.second == ZONE_INVALID_FILE) {
+      continue;
+    }
     ZoneExtent *extent = item.first->GetExtent(item.second);
     if (extent) {
       fprintf(fp, "(zone: %lu) %s %u\n", GetZoneNr(),
@@ -138,9 +137,8 @@ IOStatus Zone::Reset() {
   lifetime_ = Env::WLTH_NOT_SET;
 
   file_map_.clear();
-  file_meta_map_.clear();
+  has_meta_ = false;
 
-  nr_file_ = 0;
   total_lifetime_ = 0;
   level_bits_.reset();
 
@@ -501,56 +499,30 @@ void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
   });
 }
 
-void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list) {
-  for (const auto z : io_zones) {
-    uint64_t used_capacity = (uint64_t)z->used_capacity_;
-    uint64_t write_capacity = (z->wp_ - z->start_);
-    bool is_metadata = false;
+bool ZonedBlockDevice::ZoneValidationCheck(Zone *z) {
+  if (!z->IsUsed() || z->IsEmpty() || !z->IsFull()) {
+    return false;
+  }
 
-    if (z->open_for_write_ || z->IsEmpty() || !z->IsFull()) {
-      continue;
-    }
+  if (z->has_meta_) {
+    return false;
+  }
 
-    if (ZONE_FILE_MIN_MIX > z->file_map_.size()) {
-      continue;
-    }
-
-    for (const auto &item : z->file_map_) {
-      const bool is_sst =
-          item.first->GetFilename().find("sst") != std::string::npos;
-      const bool is_log =
-          item.first->GetFilename().find("log") != std::string::npos;
-      if (!(is_sst || is_log)) {
-        is_metadata = true;
-        break;
-      }
-    }
-
-    if (is_metadata) {
-      continue;
-    }
-
-    if (write_capacity == used_capacity) {
-      continue;
-    }
-
-#if defined(ZONE_HOT_COLD_SEP)
-    if (z->lifetime_ != Env::WriteLifeTimeHint::WLTH_MEDIUM) {
-      continue;
-    }
-#endif
-
-    if (write_capacity - used_capacity != 0) {
-      victim_list->push_back(z);
+  for (const auto item : z->file_map_) {
+    if (item.second == ZONE_INVALID_FILE) {
+      return true;
     }
   }
+
+  return false;
 }
 
-void ZonedBlockDevice::GenerateGcList(
-    std::vector<std::pair<ZoneFile *, uint64_t> > *gc_list,
-    const std::unordered_map<ZoneFile *, uint64_t> &file_map) {
-  for (const auto item : file_map) {
-    gc_list->push_back(std::make_pair<>(item.first, item.second));
+void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list) {
+  for (const auto z : io_zones) {
+    if (!ZoneValidationCheck(z)) {
+      continue;
+    }
+    victim_list->push_back(z);
   }
 }
 
@@ -565,6 +537,7 @@ Slice ZonedBlockDevice::ReadDataFromExtent(
 
   assert(scratch != NULL);
   memset(scratch, 0, zone_sz_);
+  assert(item.second != ZONE_INVALID_FILE);
 
   file = item.first;
   extent = file->GetExtent(item.second);
@@ -589,6 +562,7 @@ Slice ZonedBlockDevice::ReadDataFromExtent(
 
 IOStatus ZonedBlockDevice::CopyDataToFile(
     const std::pair<ZoneFile *, uint64_t> &item, Slice &source, char *scratch) {
+  assert(item.second != ZONE_INVALID_FILE);
   ZoneFile *file = item.first;
   uint64_t align = 0, write_size = 0, padding_size = 0;
   IOStatus s;
@@ -603,11 +577,9 @@ IOStatus ZonedBlockDevice::CopyDataToFile(
 
   memset((char *)scratch + source.size(), 0, padding_size);
   write_size = source.size() + padding_size;
-  s = file->Append((char *)scratch, write_size, source.size(), false);
+  s = file->Append((char *)scratch, write_size, source.size());
   file->PushExtent();
-  if (file->GetActiveZone()) {
-    file->SetActiveZone(nullptr);
-  }
+  file->CloseWR();
   return s;
 }
 
@@ -615,14 +587,10 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
                                      Zone *z) {
   gc_buffer_mtx_.lock();
   int ret = 0;
-  std::vector<std::pair<ZoneFile *, uint64_t> > gc_list;
+  std::vector<std::pair<ZoneFile *, uint64_t>> gc_list;
   assert(0 != z->file_map_.size());
-  if (z->open_for_write_) {
-    z->CloseWR();
-  }
+  assert(!z->open_for_write_);
   assert(IOStatus::OK() == z->Finish());
-
-  GenerateGcList(&gc_list, z->file_map_);
 
   /* generate some buffer for GC */
   if (!gc_buffer_) {
@@ -631,7 +599,10 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
     assert(0 == ret);
   }
 
-  for (const auto item : gc_list) {
+  for (const auto item : z->file_map_) {
+    if (item.second == ZONE_INVALID_FILE) {
+      continue;
+    }
     ZoneExtent *original_vector_back = nullptr;
     ZoneExtent *target_extent = nullptr;
 
@@ -677,16 +648,7 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
 #ifdef ZONE_CUSTOM_DEBUG
     fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-8lf\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
-            z->GetZoneNr(), (double)(z->total_lifetime_ / z->nr_file_));
-
-    for (auto item : z->file_meta_map_) {
-      if (zone_log_file_) {
-        fprintf(zone_log_file_, "%-10ld%-8s%-8s%-40s%-8u%-8lu%-16lu%-16lu\n",
-                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FILE",
-                "DEL", item.first.c_str(), item.second, z->GetZoneNr(), z->wp_,
-                z->start_ + z->max_capacity_);
-      }
-    }
+            z->GetZoneNr(), (double)(z->total_lifetime_ / z->file_map_.size()));
     fflush(zone_log_file_);
 #endif
     s = z->Reset();
@@ -785,6 +747,9 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
       bool is_same_level = true;
 
       for (auto item : z->file_map_) {
+        if (item.second == ZONE_INVALID_FILE) {
+          continue;
+        }
         ZoneFile *target = item.first;
         if (target->GetWriteLifeTimeHint() != file->GetWriteLifeTimeHint()) {
           is_same_level = false;
@@ -815,7 +780,7 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
 }
 
 Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
-                                        ZoneFile *file, bool is_gc = true) {
+                                        ZoneFile *file) {
   Zone *allocated_zone = nullptr;
   Zone *finish_victim = nullptr;
 
@@ -853,30 +818,33 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
     (void)ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
   }
 
-  /* TODO: you must change while statement */
-  if (ZONE_GC_ENABLE && is_gc && (files_mtx_ != nullptr) &&
-      (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK)) {
-    files_mtx_->lock();
-    std::vector<Zone *> victim_list;
-    ZoneSelectVictim(&victim_list);
-    for (auto victim : victim_list) {
+  if (files_mtx_->try_lock()) {
+    const bool is_gc =
+        ZONE_GC_ENABLE && (files_mtx_ != nullptr) &&
+        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
+
+    if (is_gc) {
+      std::vector<Zone *> victim_list;
+      ZoneSelectVictim(&victim_list);
+      for (auto victim : victim_list) {
 #ifdef ZONE_CUSTOM_DEBUG
-      if (zone_log_file_) {
-        fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_START",
-                victim->GetZoneNr());
-        fflush(zone_log_file_);
-      }
+        if (zone_log_file_) {
+          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
+                  victim->GetZoneNr());
+          fflush(zone_log_file_);
+        }
 #endif
-      (void)ZoneGc(lifetime, victim);
+        (void)ZoneGc(lifetime, victim);
 #ifdef ZONE_CUSTOM_DEBUG
-      if (zone_log_file_) {
-        fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_END",
-                victim->GetZoneNr());
-        fflush(zone_log_file_);
-      }
+        if (zone_log_file_) {
+          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
+                  victim->GetZoneNr());
+          fflush(zone_log_file_);
+        }
 #endif
+      }
     }
     files_mtx_->unlock();
   }
@@ -899,23 +867,18 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
           allocated_zone->lifetime_, lifetime);
   }
   return allocated_zone;
-}
+}  // namespace ROCKSDB_NAMESPACE
 
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
-                                     ZoneFile *file, bool is_gc = true) {
+                                     ZoneFile *file) {
   Zone *allocated_zone = nullptr;
   assert(nullptr != zone_log_file_);
 
-  if (is_gc) {
-    io_zones_mtx.lock();
-    allocated_zone = AllocateZoneRaw(lifetime, file, is_gc);
-    io_zones_mtx.unlock();
-    LogZoneStats();
-  } else {
-    allocated_zone = AllocateZoneRaw(lifetime, file, is_gc);
-  }
+  io_zones_mtx.lock();
+  allocated_zone = AllocateZoneRaw(lifetime, file);
+  io_zones_mtx.unlock();
+  LogZoneStats();
 
-  allocated_zone->nr_file_ += 1;
   allocated_zone->total_lifetime_ =
       (allocated_zone->total_lifetime_ + file->GetWriteLifeTimeHint());
   allocated_zone->level_bits_.set(file->GetWriteLifeTimeHint(), true);
@@ -924,14 +887,13 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
 }
 
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
-                                     ZoneFile *zone_file, Zone *before_zone,
-                                     bool is_gc = true) {
+                                     ZoneFile *zone_file, Zone *before_zone) {
   Zone *zone = nullptr;
 
   assert(nullptr != zone_file);
   assert(nullptr != zone_log_file_);
 
-  zone = AllocateZone(lifetime, zone_file, is_gc);
+  zone = AllocateZone(lifetime, zone_file);
 #ifdef ZONE_CUSTOM_DEBUG
   if (!before_zone) {
     fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-45s%-10u%-10lu%-10u\n",
