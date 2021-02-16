@@ -604,8 +604,8 @@ IOStatus ZonedBlockDevice::CopyDataToFile(
   return s;
 }
 
-ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
-                                     Zone *z) {
+ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
+                                            Zone *z) {
   gc_buffer_mtx_.lock();
   int ret = 0;
   std::vector<std::pair<ZoneFile *, uint64_t>> gc_list;
@@ -851,7 +851,7 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
           fflush(zone_log_file_);
         }
 #endif
-        (void)ZoneGc(lifetime, victim);
+        (void)ValidDataCopy(lifetime, victim);
 #ifdef ZONE_CUSTOM_DEBUG
         if (zone_log_file_) {
           fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",

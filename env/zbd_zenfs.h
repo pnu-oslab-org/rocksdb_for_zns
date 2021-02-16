@@ -197,7 +197,7 @@ class ZonedBlockDevice {
   void WaitUntilZoneOpenAvail();
   bool ZoneValidationCheck(Zone *z);
   void ZoneSelectVictim(std::vector<Zone *> *victim_list);
-  ZoneGcState ZoneGc(Env::WriteLifeTimeHint lifetime, Zone *z);
+  ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
