@@ -508,6 +508,10 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z) {
     return false;
   }
 
+  if (z->file_map_.size() < ZONE_FILE_MIN_MIX) {
+    return false;
+  }
+
   for (const auto item : z->file_map_) {
     if (item.second == ZONE_INVALID_FILE) {
       return true;
@@ -591,6 +595,7 @@ ZoneGcState ZonedBlockDevice::ZoneGc(Env::WriteLifeTimeHint /*lifetime*/,
   assert(0 != z->file_map_.size());
   assert(!z->open_for_write_);
   assert(IOStatus::OK() == z->Finish());
+  active_io_zones_--;
 
   /* generate some buffer for GC */
   if (!gc_buffer_) {
@@ -830,6 +835,9 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
       std::vector<Zone *> victim_list;
       ZoneSelectVictim(&victim_list);
       for (auto victim : victim_list) {
+        if (!ZoneValidationCheck(victim)) {
+          continue;
+        }
 #ifdef ZONE_CUSTOM_DEBUG
         if (zone_log_file_) {
           fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
