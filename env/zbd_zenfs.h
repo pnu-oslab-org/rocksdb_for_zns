@@ -38,7 +38,8 @@
 #define ZONE_MIX
 // #define ZONE_HOT_COLD_SEP
 
-#define ZONE_RESET_TRIGGER (30)  // Empty Zone이 10% 이하일 때
+// RESET and GC is triggered when # of Empty Zone is under 10% of total zones
+#define ZONE_RESET_TRIGGER (10)
 
 #define ZONE_FILE_MIN_MIX (2)
 #define ZONE_GC_WATERMARK \

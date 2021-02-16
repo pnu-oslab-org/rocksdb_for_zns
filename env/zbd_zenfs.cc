@@ -121,6 +121,15 @@ IOStatus Zone::Reset() {
 
   assert(!IsUsed());
 
+#ifdef ZONE_CUSTOM_DEBUG
+  if (zbd_->GetZoneLogFile()) {
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8lf\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
+            GetZoneNr(), (double)(total_lifetime_ / file_map_.size()));
+    fflush(zbd_->GetZoneLogFile());
+  }
+#endif
+
   ret = zbd_reset_zones(fd, start_, zone_sz);
   if (ret) return IOStatus::IOError("Zone reset failed\n");
 
@@ -152,6 +161,14 @@ IOStatus Zone::Finish() {
 
   assert(!open_for_write_);
 
+#ifdef ZONE_CUSTOM_DEBUG
+  if (zbd_->GetZoneLogFile()) {
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FINISH", 0,
+            GetZoneNr());
+    fflush(zbd_->GetZoneLogFile());
+  }
+#endif
   ret = zbd_finish_zones(fd, start_, zone_sz);
   if (ret) return IOStatus::IOError("Zone finish failed\n");
 
@@ -653,12 +670,6 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
 
   if (reset_condition) {
     if (!z->IsFull()) active_io_zones_--;
-#ifdef ZONE_CUSTOM_DEBUG
-    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu%-8lf\n",
-            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
-            z->GetZoneNr(), (double)(z->total_lifetime_ / z->file_map_.size()));
-    fflush(zone_log_file_);
-#endif
     s = z->Reset();
     assert(s.ok());
     if (!s.ok()) {
@@ -674,12 +685,6 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
     if (!s.ok()) {
       Debug(logger_, "Failed finishing zone");
     }
-#ifdef ZONE_CUSTOM_DEBUG
-    fprintf(zone_log_file_, "%-10ld%-8s%-8d%-8lu\n",
-            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FINISH", 0,
-            z->GetZoneNr());
-    fflush(zone_log_file_);
-#endif
     active_io_zones_--;
   }
 
