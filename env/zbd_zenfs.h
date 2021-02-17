@@ -96,7 +96,8 @@ class Zone {
   double total_lifetime_;
   std::bitset<16> level_bits_;
   std::atomic<long> used_capacity_;
-  std::vector<std::pair<ZoneFile *, uint64_t>> file_map_;
+  std::vector<std::pair<ZoneFile *, uint64_t>>
+      file_map_;  // ZoneFile pointer, extent's start
   bool has_meta_;
 
   IOStatus Reset();
