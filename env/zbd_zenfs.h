@@ -38,12 +38,14 @@
 #define ZONE_MIX
 // #define ZONE_HOT_COLD_SEP
 
-// RESET and GC is triggered when # of Empty Zone is under 10% of total zones
-#define ZONE_RESET_TRIGGER (10)
+// RESET and GC is triggered when # of Empty Zone is under 100% of total zones
+#define ZONE_RESET_TRIGGER (100)
 
 #define ZONE_FILE_MIN_MIX (2)
 #define ZONE_GC_WATERMARK \
-  (ZONE_RESET_TRIGGER)      // if you don't have 30% of empty zones, GC started
+  (ZONE_RESET_TRIGGER)  // if you don't have 30% of empty zones, GC started
+#define ZONE_INVALID_PERCENT \
+  (50)                      // GC target must be hold the over 50% invalid
 #define ZONE_GC_ENABLE (1)  // is gc enable
 #define ZONE_INVALID_FILE (std::numeric_limits<uint64_t>::max())
 
@@ -112,7 +114,7 @@ class Zone {
   uint64_t GetCapacityLeft();
 
   void SetZoneFile(ZoneFile *file, uint64_t extent_start);
-  void RemoveZoneFile(ZoneFile *file);
+  void RemoveZoneFile(ZoneFile *file, uint64_t extent_start);
   void PrintZoneFiles(FILE *fp);
 
   void CloseWR(); /* Done writing */
@@ -196,8 +198,8 @@ class ZonedBlockDevice {
   IOStatus CopyDataToFile(const std::pair<ZoneFile *, uint64_t> &item,
                           Slice &source, char *scratch);
   void WaitUntilZoneOpenAvail();
-  bool ZoneValidationCheck(Zone *z);
-  void ZoneSelectVictim(std::vector<Zone *> *victim_list);
+  bool ZoneValidationCheck(Zone *z, ZoneFile *file);
+  void ZoneSelectVictim(std::vector<Zone *> *victim_list, ZoneFile *file);
   ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);

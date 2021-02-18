@@ -43,7 +43,7 @@ void ZoneExtent::EncodeTo(std::string* output) {
   PutFixed32(output, length_);
 }
 
-ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_); }
+ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_, start_); }
 
 enum ZoneFileTag : uint32_t {
   kFileID = 1,
@@ -320,14 +320,14 @@ void ZoneFile::ReplaceExtent(ZoneExtent* target, ZoneExtent* top) {
   std::vector<ZoneExtent*> temp_extents;
   std::copy(top_pos + 1, extents_.end(), std::back_inserter(temp_extents));
 
-  for (auto it = top_pos + 1; it != extents_.end(); it++) {
-    ZoneExtent* extent = *it;
-    fileSize -= extent->length_;
-  }
-
   extents_.erase(top_pos + 1, extents_.end());
   extents_.insert(remove_pos + 1, temp_extents.begin(), temp_extents.end());
   extents_.erase(remove_pos);
+
+  fileSize = 0;
+  for (const auto it : extents_) {
+    fileSize += it->length_;
+  }
 
   extent_start_ = extents_.back()->start_;
   extent_filepos_ = fileSize;

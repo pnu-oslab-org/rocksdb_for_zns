@@ -53,6 +53,8 @@ class ZoneFile {
   Zone* active_zone_;
   uint64_t extent_start_;
   uint64_t extent_filepos_;
+  std::recursive_mutex file_append_mtx_;
+  std::recursive_mutex push_extent_mtx_;
 
   Env::WriteLifeTimeHint lifetime_;
   uint64_t fileSize;
