@@ -83,6 +83,21 @@ class ZoneExtent;
 
 #define ZONE_EXTENT_FIND_FAIL (std::numeric_limits<uint64_t>::max())
 
+class ZoneMapEntry {
+ public:
+  ZoneFile *file_;
+
+  uint64_t extent_start_;
+  uint32_t extent_length_;
+
+  std::string filename_;
+  std::atomic<bool> is_invalid_;
+
+  Env::WriteLifeTimeHint lifetime_;
+
+  explicit ZoneMapEntry(ZoneFile *file, ZoneExtent *extent);
+};
+
 class Zone {
   ZonedBlockDevice *zbd_;
 
@@ -98,8 +113,7 @@ class Zone {
   double total_lifetime_;
   std::bitset<16> level_bits_;
   std::atomic<long> used_capacity_;
-  std::vector<std::pair<ZoneFile *, uint64_t>>
-      file_map_;  // ZoneFile pointer, extent's start
+  std::vector<ZoneMapEntry *> file_map_;
   bool has_meta_;
 
   IOStatus Reset();
@@ -113,8 +127,8 @@ class Zone {
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
 
-  void SetZoneFile(ZoneFile *file, uint64_t extent_start);
-  void RemoveZoneFile(ZoneFile *file, uint64_t extent_start);
+  void SetZoneFile(ZoneFile *file, ZoneExtent *extent);
+  void RemoveZoneFile(ZoneFile *file, ZoneExtent *extent);
   void PrintZoneFiles(FILE *fp);
 
   void CloseWR(); /* Done writing */
@@ -193,10 +207,10 @@ class ZonedBlockDevice {
   unsigned int GetMaxNrOpenIOZone() { return max_nr_open_io_zones_; };
 
  private:
-  Slice ReadDataFromExtent(const std::pair<ZoneFile *, uint64_t> &item,
-                           char *scratch, ZoneExtent **target_extent);
-  IOStatus CopyDataToFile(const std::pair<ZoneFile *, uint64_t> &item,
-                          Slice &source, char *scratch);
+  Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
+                           ZoneExtent **target_extent);
+  IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
+                          char *scratch);
   void WaitUntilZoneOpenAvail();
   bool ZoneValidationCheck(Zone *z, ZoneFile *file);
   void ZoneSelectVictim(std::vector<Zone *> *victim_list, ZoneFile *file);

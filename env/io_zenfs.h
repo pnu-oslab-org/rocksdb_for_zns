@@ -38,7 +38,7 @@ class ZoneExtent {
                       ZoneFile* file)
       : start_(start), length_(length), zone_(zone), file_(file) {
     if (zone != nullptr) {
-      zone->SetZoneFile(file, start);
+      zone->SetZoneFile(file, this);
     }
   };
   Status DecodeFrom(Slice* input);

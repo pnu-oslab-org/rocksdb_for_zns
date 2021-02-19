@@ -44,6 +44,14 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+ZoneMapEntry::ZoneMapEntry(ZoneFile *file, ZoneExtent *extent) : file_(file) {
+  extent_start_ = extent->start_;
+  extent_length_ = extent->length_;
+  lifetime_ = file->GetWriteLifeTimeHint();
+  filename_ = file->GetFilename();
+  is_invalid_ = false;
+}
+
 Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
     : zbd_(zbd),
       start_(zbd_zone_start(z)),
@@ -65,7 +73,7 @@ bool Zone::IsFull() { return (capacity_ == 0); }
 bool Zone::IsEmpty() { return (wp_ == start_); }
 uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
 
-void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
+void Zone::SetZoneFile(ZoneFile *file, ZoneExtent *extent) {
   assert(nullptr != file);
 
   bool is_sst = file->GetFilename().find("sst") == std::string::npos;
@@ -73,13 +81,14 @@ void Zone::SetZoneFile(ZoneFile *file, uint64_t extent_start) {
   if (!is_sst && !is_log) {
     has_meta_ = true;
   }
-  file_map_.push_back(std::make_pair<>(file, extent_start));
+  file_map_.push_back(new ZoneMapEntry(file, extent));
 }
 
-void Zone::RemoveZoneFile(ZoneFile *file, uint64_t start) {
-  for (auto it = file_map_.begin(); it != file_map_.end(); it++) {
-    if (it->first == file && it->second == start) {
-      it->second = ZONE_INVALID_FILE;
+void Zone::RemoveZoneFile(ZoneFile *file, ZoneExtent *extent) {
+  for (const auto item : file_map_) {
+    if (item->file_ == file && item->extent_start_ == extent->start_) {
+      item->is_invalid_ = true;
+      break;
     }
   }
 }
@@ -88,13 +97,13 @@ void Zone::PrintZoneFiles(FILE *fp) {
   assert(nullptr != fp);
 
   for (const auto item : file_map_) {
-    if (item.second == ZONE_INVALID_FILE) {
+    if (item->is_invalid_) {
       continue;
     }
-    ZoneExtent *extent = item.first->GetExtent(item.second);
+    ZoneExtent *extent = item->file_->GetExtent(item->extent_start_);
     if (extent) {
       fprintf(fp, "(zone: %lu) %s %u\n", GetZoneNr(),
-              item.first->GetFilename().c_str(), extent->length_);
+              item->file_->GetFilename().c_str(), extent->length_);
       fflush(fp);
     }
   }
@@ -145,6 +154,9 @@ IOStatus Zone::Reset() {
   wp_ = start_;
   lifetime_ = Env::WLTH_NOT_SET;
 
+  for (const auto item : file_map_) {
+    free(item);
+  }
   file_map_.clear();
   has_meta_ = false;
 
@@ -517,6 +529,8 @@ void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
 }
 
 bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, ZoneFile *file) {
+  uint64_t write_capacity = 0;
+  uint64_t invalid_capacity = 0;
   if (z->open_for_write_ || !z->IsFull() || z->used_capacity_ == 0) {
     return false;
   }
@@ -530,29 +544,24 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, ZoneFile *file) {
   }
 
   for (const auto item : z->file_map_) {
-    if (item.second != ZONE_INVALID_FILE) {
-      if (item.first->GetActiveZone() != nullptr) {
+    write_capacity += item->extent_length_;
+    if (item->is_invalid_) {
+      invalid_capacity += item->extent_length_;
+      if (item->file_ == file) {
+        return false;
+      }
+    } else {
+      if (item->file_->GetActiveZone() != nullptr) {
         return false;
       }
     }
-    if (item.first == file) {
-      return false;
-    }
   }
 
-  uint64_t write_capacity = (z->wp_ - z->start_);
-  uint64_t invalid_capacity = write_capacity - z->used_capacity_;
   if (invalid_capacity * 100 < write_capacity * ZONE_INVALID_PERCENT) {
     return false;
   }
 
-  for (const auto item : z->file_map_) {
-    if (item.second == ZONE_INVALID_FILE) {
-      return true;
-    }
-  }
-
-  return false;
+  return true;
 }
 
 void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list,
@@ -565,9 +574,9 @@ void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list,
   }
 }
 
-Slice ZonedBlockDevice::ReadDataFromExtent(
-    const std::pair<ZoneFile *, uint64_t> &item, char *scratch,
-    ZoneExtent **target_extent) {
+Slice ZonedBlockDevice::ReadDataFromExtent(const ZoneMapEntry *item,
+                                           char *scratch,
+                                           ZoneExtent **target_extent) {
   Slice result;
   uint64_t offset, expected_offset;
 
@@ -576,10 +585,10 @@ Slice ZonedBlockDevice::ReadDataFromExtent(
 
   assert(scratch != NULL);
   memset(scratch, 0, zone_sz_);
-  assert(item.second != ZONE_INVALID_FILE);
+  assert(!item->is_invalid_);
 
-  file = item.first;
-  extent = file->GetExtent(item.second);
+  file = item->file_;
+  extent = file->GetExtent(item->extent_start_);
 
   assert(file != NULL && extent != NULL);
 
@@ -599,10 +608,10 @@ Slice ZonedBlockDevice::ReadDataFromExtent(
   return result;
 }
 
-IOStatus ZonedBlockDevice::CopyDataToFile(
-    const std::pair<ZoneFile *, uint64_t> &item, Slice &source, char *scratch) {
-  assert(item.second != ZONE_INVALID_FILE);
-  ZoneFile *file = item.first;
+IOStatus ZonedBlockDevice::CopyDataToFile(const ZoneMapEntry *item,
+                                          Slice &source, char *scratch) {
+  assert(!item->is_invalid_);
+  ZoneFile *file = item->file_;
   uint64_t align = 0, write_size = 0, padding_size = 0;
   IOStatus s;
 
@@ -644,13 +653,13 @@ ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
   }
 
   for (const auto item : z->file_map_) {
-    if (item.second == ZONE_INVALID_FILE) {
+    if (item->is_invalid_) {
       continue;
     }
     ZoneExtent *original_vector_back = nullptr;
     ZoneExtent *target_extent = nullptr;
 
-    ZoneFile *file = item.first;
+    ZoneFile *file = item->file_;
     uint64_t file_size = 0;
     Slice result;
 
@@ -822,18 +831,14 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
 
       bool is_same_level = true;
 
-      for (auto item : z->file_map_) {
-        if (item.second == ZONE_INVALID_FILE) {
-          continue;
-        }
-        ZoneFile *target = item.first;
-        if (target->GetWriteLifeTimeHint() != file->GetWriteLifeTimeHint()) {
+      for (const auto item : z->file_map_) {
+        if (item->lifetime_ != file->GetWriteLifeTimeHint()) {
           is_same_level = false;
           break;
         }
 
         if (GetZoneFileExt(file->GetFilename()) !=
-            GetZoneFileExt(target->GetFilename())) {
+            GetZoneFileExt(item->filename_)) {
           is_same_level = false;
           break;
         }

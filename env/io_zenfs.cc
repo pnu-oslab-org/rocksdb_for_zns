@@ -43,7 +43,7 @@ void ZoneExtent::EncodeTo(std::string* output) {
   PutFixed32(output, length_);
 }
 
-ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_, start_); }
+ZoneExtent::~ZoneExtent() { zone_->RemoveZoneFile(file_, this); }
 
 enum ZoneFileTag : uint32_t {
   kFileID = 1,
