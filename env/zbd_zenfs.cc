@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -259,6 +260,9 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   Info(logger_, "New Zoned Block Device: %s", filename_.c_str());
   zone_log_file_ = nullptr;
   files_mtx_ = nullptr;
+  gc_thread_ = nullptr;
+  gc_thread_stop_ = false;
+  gc_force_ = false;
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -310,9 +314,10 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   sstr << "zone_e" << ZONE_RESET_TRIGGER << "_no_sep.log";
 #endif
 
+#ifdef ZONE_CUSTOM_DEBUG
   zone_log_file_ = fopen(sstr.str().c_str(), "w");
   assert(NULL != zone_log_file_);
-#ifdef ZONE_CUSTOM_DEBUG
+
   fprintf(zone_log_file_, "%-10s%-8s%-8s%-8s%-45s%-10s%-10s%-10s\n", "TIME(ms)",
           "CMD", "ZONE(-)", "ZONE(+)", "FILE NAME", "WRITE", "FILE SIZE",
           "LEVEL");
@@ -382,7 +387,108 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   free(zone_rep);
   start_time_ = time(NULL);
 
+  gc_thread_ =
+      new std::thread(&ZonedBlockDevice::GarbageCollectionThread, this);
+  assert(nullptr != gc_thread_);
+
   return IOStatus::OK();
+}
+
+void ZonedBlockDevice::GarbageCollectionThread() {
+  while (GarbageCollectionSchedule(ZONE_GC_THREAD_TICK) || gc_force_) {
+    bool is_trigger =
+        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER);
+    if (gc_thread_stop_) {
+      break;
+    }
+
+    if (gc_force_ || is_trigger) {
+      io_zones_mtx.lock();
+#ifdef ZONE_CUSTOM_DEBUG
+      if (gc_force_) {
+        fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FORCED",
+                GetNrZones(), GetEmptyZones());
+        fflush(zone_log_file_);
+      }
+#endif
+      active_gc_++;
+      GarbageCollection(is_trigger, Env::WLTH_NONE);
+      io_zones_mtx.unlock();
+      gc_force_ = false;
+      NotifyZoneAllocateAvail();
+    }
+  }
+}
+
+void ZonedBlockDevice::GarbageCollection(
+    const bool is_trigger, const Env::WriteLifeTimeHint lifetime) {
+  Zone *finish_victim = nullptr;
+
+  if (files_mtx_ == nullptr) {  // This for zenfs
+    return;
+  }
+
+#ifdef ZONE_CUSTOM_DEBUG
+  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
+          (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
+          GetNrZones(), GetEmptyZones());
+  fflush(zone_log_file_);
+
+  if (is_trigger) {
+    fprintf(zone_log_file_, "%-10ld%-8s\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "TRIGGER");
+    fflush(zone_log_file_);
+  }
+#endif
+
+  for (const auto z : io_zones) {
+    bool reset_cond, finish_cond;
+#if defined(ZONE_MIX)
+    reset_cond = (!z->IsUsed() && is_trigger);
+    finish_cond = (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
+#else
+    reset_cond = (!z->IsUsed() && is_trigger);
+    finish_cond = (z->capacity_ > 0);
+#endif
+
+    // z->PrintZoneFiles(zone_log_file_);
+    (void)ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
+  }
+
+  if (files_mtx_->try_lock()) {
+    const bool is_gc =
+        ZONE_GC_ENABLE && (files_mtx_ != nullptr) &&
+        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
+
+    if (is_gc) {
+      std::vector<Zone *> victim_list;
+      ZoneSelectVictim(&victim_list, nullptr);
+      for (auto victim : victim_list) {
+        if (!ZoneValidationCheck(victim, nullptr)) {
+          continue;
+        }
+#ifdef ZONE_CUSTOM_DEBUG
+        if (zone_log_file_) {
+          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
+                  victim->GetZoneNr());
+          fflush(zone_log_file_);
+        }
+#endif
+        (void)ValidDataCopy(lifetime, victim);
+#ifdef ZONE_CUSTOM_DEBUG
+        if (zone_log_file_) {
+          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
+                  victim->GetZoneNr());
+          fflush(zone_log_file_);
+        }
+#endif
+      }
+    }
+    files_mtx_->unlock();
+  }
 }
 
 void ZonedBlockDevice::NotifyIOZoneFull() {
@@ -395,6 +501,26 @@ void ZonedBlockDevice::NotifyIOZoneClosed() {
   const std::lock_guard<std::mutex> lock(zone_resources_mtx_);
   open_io_zones_--;
   zone_resources_.notify_one();
+}
+
+void ZonedBlockDevice::NotifyZoneAllocateAvail() {
+  const std::lock_guard<std::mutex> lock(gc_thread_mtx_);
+  active_gc_--;
+  gc_thread_cond_.notify_all();
+}
+
+void ZonedBlockDevice::NotifyGarbageCollectionRun() {
+  const std::lock_guard<std::mutex> lock(gc_force_mtx_);
+  gc_force_ = true;
+#ifdef ZONE_CUSTOM_DEBUG
+  if (gc_force_) {
+    fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "NOTIFY",
+            GetNrZones(), GetEmptyZones());
+    fflush(zone_log_file_);
+  }
+#endif
+  gc_force_cond_.notify_all();
 }
 
 uint64_t ZonedBlockDevice::GetFreeSpace() {
@@ -457,6 +583,11 @@ void ZonedBlockDevice::LogZoneUsage() {
 }
 
 ZonedBlockDevice::~ZonedBlockDevice() {
+  gc_thread_stop_ = true;
+  if (gc_thread_) {
+    gc_thread_->join();
+    free(gc_thread_);
+  }
   for (const auto z : meta_zones) {
     delete z;
   }
@@ -525,6 +656,26 @@ void ZonedBlockDevice::WaitUntilZoneOpenAvail() {
   zone_resources_.wait(lk, [this] {
     if (open_io_zones_.load() < max_nr_open_io_zones_) return true;
     return false;
+  });
+}
+
+void ZonedBlockDevice::WaitUntilZoneAllocateAvail() {
+  std::unique_lock<std::mutex> lk(gc_thread_mtx_);
+  gc_thread_cond_.wait(lk, [this] {
+    std::thread::id thread_id = std::this_thread::get_id();
+    if (active_gc_ == 0 || (thread_id == gc_thread_->get_id())) {
+      return true;
+    }
+    return false;
+  });
+}
+
+template <class Duration>
+bool ZonedBlockDevice::GarbageCollectionSchedule(const Duration &duration) {
+  std::unique_lock<std::mutex> lk(gc_force_mtx_);
+  return !gc_force_cond_.wait_for(lk, duration, [this]() {
+    bool gc_force = gc_force_;
+    return gc_force;
   });
 }
 
@@ -860,86 +1011,21 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
   return best_diff;
 }
 
-Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
-                                        ZoneFile *file) {
+Zone *ZonedBlockDevice::AllocateZoneImpl(Env::WriteLifeTimeHint lifetime,
+                                         ZoneFile *file) {
   Zone *allocated_zone = nullptr;
-  Zone *finish_victim = nullptr;
 
   unsigned int best_diff;
   int new_zone;
-  const bool is_trigger =
-      (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER);
   /* Make sure we are below the zone open limit */
   WaitUntilZoneOpenAvail();
-
-#ifdef ZONE_CUSTOM_DEBUG
-  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
-          (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
-          GetNrZones(), GetEmptyZones());
-  fflush(zone_log_file_);
-
-  if (is_trigger) {
-    fprintf(zone_log_file_, "%-10ld%-8s\n",
-            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "TRIGGER");
-    fflush(zone_log_file_);
-  }
-#endif
-
-  for (const auto z : io_zones) {
-    bool reset_cond, finish_cond;
-#if defined(ZONE_MIX)
-    reset_cond = (!z->IsUsed() && is_trigger);
-    finish_cond = (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
-#else
-    reset_cond = (!z->IsUsed() && is_trigger);
-    finish_cond = (z->capacity_ > 0);
-#endif
-
-    // z->PrintZoneFiles(zone_log_file_);
-    (void)ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
-  }
-
-  if (files_mtx_->try_lock()) {
-    const bool is_gc =
-        ZONE_GC_ENABLE && (files_mtx_ != nullptr) &&
-        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
-
-    if (is_gc) {
-      std::vector<Zone *> victim_list;
-      ZoneSelectVictim(&victim_list, file);
-      for (auto victim : victim_list) {
-        if (!ZoneValidationCheck(victim, file)) {
-          continue;
-        }
-#ifdef ZONE_CUSTOM_DEBUG
-        if (zone_log_file_) {
-          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
-                  victim->GetZoneNr());
-          fflush(zone_log_file_);
-        }
-#endif
-        (void)ValidDataCopy(lifetime, victim);
-#ifdef ZONE_CUSTOM_DEBUG
-        if (zone_log_file_) {
-          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
-                  victim->GetZoneNr());
-          fflush(zone_log_file_);
-        }
-#endif
-      }
-    }
-    files_mtx_->unlock();
-  }
 
 #if defined(ZONE_MIX)
   best_diff = GetAlreadyOpenZone(&allocated_zone, file, lifetime);
 #else
   best_diff = LIFETIME_DIFF_NOT_GOOD;
 #endif
-  new_zone =
-      AllocateEmptyZone(best_diff, finish_victim, &allocated_zone, lifetime);
+  new_zone = AllocateEmptyZone(best_diff, nullptr, &allocated_zone, lifetime);
 
   if (allocated_zone) {
     assert(!allocated_zone->open_for_write_);
@@ -956,11 +1042,20 @@ Zone *ZonedBlockDevice::AllocateZoneRaw(Env::WriteLifeTimeHint lifetime,
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
                                      ZoneFile *file) {
   Zone *allocated_zone = nullptr;
+#ifdef ZONE_CUSTOM_DEBUG
   assert(nullptr != zone_log_file_);
+#endif
 
-  io_zones_mtx.lock();
-  allocated_zone = AllocateZoneRaw(lifetime, file);
-  io_zones_mtx.unlock();
+  do {
+    WaitUntilZoneAllocateAvail();
+    io_zones_mtx.lock();
+    allocated_zone = AllocateZoneImpl(lifetime, file);
+    io_zones_mtx.unlock();
+    if (!allocated_zone) {
+      NotifyGarbageCollectionRun();
+      std::this_thread::yield();
+    }
+  } while (!allocated_zone);
   LogZoneStats();
 
   allocated_zone->total_lifetime_ =
@@ -975,7 +1070,9 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
   Zone *zone = nullptr;
 
   assert(nullptr != zone_file);
+#ifdef ZONE_CUSTOM_DEBUG
   assert(nullptr != zone_log_file_);
+#endif
 
   zone = AllocateZone(lifetime, zone_file);
 #ifdef ZONE_CUSTOM_DEBUG

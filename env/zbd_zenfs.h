@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -42,6 +44,7 @@
 #define ZONE_RESET_TRIGGER (100)
 
 #define ZONE_FILE_MIN_MIX (2)
+#define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(100))
 #define ZONE_GC_WATERMARK \
   (ZONE_RESET_TRIGGER)  // if you don't have 30% of empty zones, GC started
 #define ZONE_INVALID_PERCENT \
@@ -154,6 +157,16 @@ class ZonedBlockDevice {
   std::atomic<long> open_io_zones_;
   std::condition_variable zone_resources_;
   std::mutex zone_resources_mtx_; /* Protects active/open io zones */
+
+  std::atomic<bool> gc_force_;
+  std::atomic<bool> gc_thread_stop_;
+  std::atomic<long> active_gc_;
+  std::condition_variable gc_thread_cond_;
+  std::condition_variable gc_force_cond_;
+  std::mutex gc_force_mtx_;
+  std::mutex gc_thread_mtx_;
+  std::thread *gc_thread_;
+
   std::mutex gc_buffer_mtx_;
 
   FILE *zone_log_file_;
@@ -162,7 +175,7 @@ class ZonedBlockDevice {
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
-  Zone *AllocateZoneRaw(Env::WriteLifeTimeHint lifetime, ZoneFile *file);
+  Zone *AllocateZoneImpl(Env::WriteLifeTimeHint lifetime, ZoneFile *file);
 
  public:
   explicit ZonedBlockDevice(std::string bdevname,
@@ -202,16 +215,24 @@ class ZonedBlockDevice {
 
   void NotifyIOZoneFull();
   void NotifyIOZoneClosed();
+  void NotifyZoneAllocateAvail();
+  void NotifyGarbageCollectionRun();
 
   long GetOpenIOZone() { return open_io_zones_; };
   unsigned int GetMaxNrOpenIOZone() { return max_nr_open_io_zones_; };
 
  private:
+  void GarbageCollectionThread(void);
+  void GarbageCollection(const bool is_trigger,
+                         const Env::WriteLifeTimeHint lifetime);
   Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
                            ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
                           char *scratch);
   void WaitUntilZoneOpenAvail();
+  void WaitUntilZoneAllocateAvail();
+  template <class Duration>
+  bool GarbageCollectionSchedule(const Duration &duration);
   bool ZoneValidationCheck(Zone *z, ZoneFile *file);
   void ZoneSelectVictim(std::vector<Zone *> *victim_list, ZoneFile *file);
   ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
