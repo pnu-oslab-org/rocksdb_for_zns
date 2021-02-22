@@ -232,9 +232,11 @@ IOStatus Zone::Append(char *data, uint32_t size) {
     ret = pwrite(fd, ptr, left, wp_);
     if (ret < 0) {
       fprintf(stderr,
-              "- Zone: %lu\n\tWP: %lu + %u(%lu)\n\t# of open zones: %ld(%u)\n",
+              "- Zone: %lu\n\tWP: %lu + %u(%lu)\n\t# of open zones: "
+              "%ld(%u)\n\t# of active zones: %ld(%u)\n",
               GetZoneNr(), wp_, left, start_ + zbd_->GetZoneSize(),
-              zbd_->GetOpenIOZone(), zbd_->GetMaxNrOpenIOZone());
+              zbd_->GetOpenIOZone(), zbd_->GetMaxNrOpenIOZone(),
+              zbd_->GetActiveIOZone(), zbd_->GetMaxNrActiveIOZone());
       perror("pwrite failed");
       return IOStatus::IOError("Write failed");
     }
@@ -793,8 +795,8 @@ ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
   std::vector<std::pair<ZoneFile *, uint64_t>> gc_list;
   assert(0 != z->file_map_.size());
   assert(!z->open_for_write_);
-  assert(IOStatus::OK() == z->Finish());
-  active_io_zones_--;
+  // assert(IOStatus::OK() == z->Finish());
+  // active_io_zones_--;
 
   /* generate some buffer for GC */
   if (!gc_buffer_) {
@@ -1014,6 +1016,7 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
 Zone *ZonedBlockDevice::AllocateZoneImpl(Env::WriteLifeTimeHint lifetime,
                                          ZoneFile *file) {
   Zone *allocated_zone = nullptr;
+  Zone *finish_victim = nullptr;
 
   unsigned int best_diff;
   int new_zone;
@@ -1025,7 +1028,8 @@ Zone *ZonedBlockDevice::AllocateZoneImpl(Env::WriteLifeTimeHint lifetime,
 #else
   best_diff = LIFETIME_DIFF_NOT_GOOD;
 #endif
-  new_zone = AllocateEmptyZone(best_diff, nullptr, &allocated_zone, lifetime);
+  new_zone =
+      AllocateEmptyZone(best_diff, finish_victim, &allocated_zone, lifetime);
 
   if (allocated_zone) {
     assert(!allocated_zone->open_for_write_);
@@ -1042,6 +1046,7 @@ Zone *ZonedBlockDevice::AllocateZoneImpl(Env::WriteLifeTimeHint lifetime,
 Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
                                      ZoneFile *file) {
   Zone *allocated_zone = nullptr;
+  int notify_retry_counter = ZONE_MAX_NOTIFY_RETRY;
 #ifdef ZONE_CUSTOM_DEBUG
   assert(nullptr != zone_log_file_);
 #endif
@@ -1054,6 +1059,12 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
     if (!allocated_zone) {
       NotifyGarbageCollectionRun();
       std::this_thread::yield();
+      notify_retry_counter--;
+      if (notify_retry_counter <= 0) {
+        fprintf(stderr, "Notify retry failed detected.(%s)\n",
+                file->GetFilename().c_str());
+        assert(notify_retry_counter > 0);
+      }
     }
   } while (!allocated_zone);
   LogZoneStats();

@@ -42,6 +42,7 @@
 
 // RESET and GC is triggered when # of Empty Zone is under 100% of total zones
 #define ZONE_RESET_TRIGGER (100)
+#define ZONE_MAX_NOTIFY_RETRY (5)
 
 #define ZONE_FILE_MIN_MIX (2)
 #define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(100))
@@ -218,8 +219,10 @@ class ZonedBlockDevice {
   void NotifyZoneAllocateAvail();
   void NotifyGarbageCollectionRun();
 
-  long GetOpenIOZone() { return open_io_zones_; };
-  unsigned int GetMaxNrOpenIOZone() { return max_nr_open_io_zones_; };
+  long GetOpenIOZone() { return open_io_zones_; }
+  unsigned int GetMaxNrOpenIOZone() { return max_nr_open_io_zones_; }
+  long GetActiveIOZone() { return active_io_zones_; }
+  unsigned int GetMaxNrActiveIOZone() { return max_nr_active_io_zones_; }
 
  private:
   void GarbageCollectionThread(void);
