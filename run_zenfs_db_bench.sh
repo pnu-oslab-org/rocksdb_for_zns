@@ -21,10 +21,12 @@ echo "TARGET_FZ_BASE=$TARGET_FZ_BASE bytes"
 echo "TARGET_FILE_SIZE_MULTIPLIER=$TARGET_FILE_SIZE_MULTIPLIER"
 echo "MAX_BYTES_FOR_LEVEL_BASE=$MAX_BYTES_FOR_LEVEL_BASE bytes"
 
-NR_KEYS=9000000
+NR_KEYS=5000000
 #NR_KEYS=1000000
 
 echo deadline > /sys/class/block/$DEV/queue/scheduler
+
+NR_PROC=$(expr $(nproc) / 2)
 
 ./zenfs mkfs --zbd=$DEV --aux_path=/tmp/zenfs_$DEV --finish_threshold=$FUZZ --force
 ./db_bench \
@@ -36,6 +38,34 @@ echo deadline > /sys/class/block/$DEV/queue/scheduler
     --max_bytes_for_level_base=$MAX_BYTES_FOR_LEVEL_BASE \
     --max_bytes_for_level_multiplier=$TARGET_FILE_SIZE_MULTIPLIER \
     --use_direct_io_for_flush_and_compaction \
-    --max_background_jobs=$(nproc) \
+    --max_background_jobs=$NR_PROC \
     --num=$NR_KEYS \
-    --benchmarks=fillrandom,overwrite
+    --benchmarks=fillseq,overwrite
+
+# ./db_bench \
+#    --fs_uri=zenfs://dev:$DEV \
+#   --benchmarks=mixgraph \
+#   -use_direct_io_for_flush_and_compaction=true \
+#   -use_direct_reads=true \
+#   -cache_size=268435456 \
+#   -keyrange_dist_a=14.18 \
+#   -keyrange_dist_b=-2.917 \
+#   -keyrange_dist_c=0.0164 \
+#   -keyrange_dist_d=-0.08082 \
+#   -keyrange_num=30 \
+#   -value_k=0.2615 \
+#   -value_sigma=25.45 \
+#   -iter_k=2.517 \
+#   -iter_sigma=14.236 \
+#   -mix_get_ratio=0.85 \
+#   -mix_put_ratio=0.14 \
+#   -mix_seek_ratio=0.01 \
+#   -sine_mix_rate_interval_milliseconds=5000 \
+#   -sine_a=1000 \
+#   -sine_b=0.000073 \
+#   -sine_d=4500 \
+#   --perf_level=2 \
+#   -reads=420000000 \
+#   -num=50000000 \
+#   -key_size=48
+#

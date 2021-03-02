@@ -49,9 +49,16 @@
 #define ZONE_GC_WATERMARK \
   (ZONE_RESET_TRIGGER)  // if you don't have 30% of empty zones, GC started
 #define ZONE_INVALID_PERCENT \
-  (50)                      // GC target must be hold the over 50% invalid
-#define ZONE_GC_ENABLE (1)  // is gc enable
+  (50)  // GC target must be hold the over 50% invalid
+#define ZONE_AVG_EXCEPT_LIFETIME \
+  (3)  // GC target must be hold the lifetime to over 2
+#define ZONE_HOT_NOT_IGNORE_PERCENT (30)  // threshold of the Hot zone.
+#define ZONE_GC_ENABLE (1)                // is gc enable
 #define ZONE_INVALID_FILE (std::numeric_limits<uint64_t>::max())
+
+#if (ZONE_HOT_NOT_IGNORE_PERCENT > ZONE_RESET_TRIGGER)
+#error "ZONE_HOT_NOT_IGNORE_PERCENT must be lower than ZONE_RESET_TRIGGER"
+#endif
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")
@@ -226,8 +233,9 @@ class ZonedBlockDevice {
 
  private:
   void GarbageCollectionThread(void);
-  void GarbageCollection(const bool is_trigger,
-                         const Env::WriteLifeTimeHint lifetime);
+  void GarbageCollection(const bool &is_trigger,
+                         const Env::WriteLifeTimeHint lifetime,
+                         const bool &is_force);
   Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
                            ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
@@ -236,8 +244,8 @@ class ZonedBlockDevice {
   void WaitUntilZoneAllocateAvail();
   template <class Duration>
   bool GarbageCollectionSchedule(const Duration &duration);
-  bool ZoneValidationCheck(Zone *z, ZoneFile *file);
-  void ZoneSelectVictim(std::vector<Zone *> *victim_list, ZoneFile *file);
+  bool ZoneValidationCheck(Zone *z, const bool &is_force);
+  void ZoneSelectVictim(std::vector<Zone *> *victim_list, const bool &is_force);
   ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);

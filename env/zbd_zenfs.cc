@@ -397,13 +397,17 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
 }
 
 void ZonedBlockDevice::GarbageCollectionThread() {
+  uint32_t previous_empty_zones = GetEmptyZones();
   while (GarbageCollectionSchedule(ZONE_GC_THREAD_TICK) || gc_force_) {
+    uint32_t current_empty_zones = GetEmptyZones();
     bool is_trigger =
-        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_RESET_TRIGGER);
+        (current_empty_zones * 100 <= GetNrZones() * ZONE_RESET_TRIGGER);
     if (gc_thread_stop_) {
       break;
     }
 
+    is_trigger &= (current_empty_zones < previous_empty_zones);
+    previous_empty_zones = current_empty_zones;
     if (gc_force_ || is_trigger) {
       io_zones_mtx.lock();
 #ifdef ZONE_CUSTOM_DEBUG
@@ -415,7 +419,7 @@ void ZonedBlockDevice::GarbageCollectionThread() {
       }
 #endif
       active_gc_++;
-      GarbageCollection(is_trigger, Env::WLTH_NONE);
+      GarbageCollection(is_trigger, Env::WLTH_NONE, gc_force_);
       io_zones_mtx.unlock();
       gc_force_ = false;
       NotifyZoneAllocateAvail();
@@ -423,8 +427,9 @@ void ZonedBlockDevice::GarbageCollectionThread() {
   }
 }
 
-void ZonedBlockDevice::GarbageCollection(
-    const bool is_trigger, const Env::WriteLifeTimeHint lifetime) {
+void ZonedBlockDevice::GarbageCollection(const bool &is_trigger,
+                                         const Env::WriteLifeTimeHint lifetime,
+                                         const bool &is_force) {
   Zone *finish_victim = nullptr;
 
   if (files_mtx_ == nullptr) {  // This for zenfs
@@ -465,9 +470,9 @@ void ZonedBlockDevice::GarbageCollection(
 
     if (is_gc) {
       std::vector<Zone *> victim_list;
-      ZoneSelectVictim(&victim_list, nullptr);
+      ZoneSelectVictim(&victim_list, is_force);
       for (auto victim : victim_list) {
-        if (!ZoneValidationCheck(victim, nullptr)) {
+        if (!ZoneValidationCheck(victim, is_force)) {
           continue;
         }
 #ifdef ZONE_CUSTOM_DEBUG
@@ -681,9 +686,13 @@ bool ZonedBlockDevice::GarbageCollectionSchedule(const Duration &duration) {
   });
 }
 
-bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, ZoneFile *file) {
+bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, const bool &is_force) {
+  const bool is_hot_consider =
+      (GetEmptyZones() * 100 <= GetNrZones() * ZONE_HOT_NOT_IGNORE_PERCENT);
   uint64_t write_capacity = 0;
   uint64_t invalid_capacity = 0;
+  uint64_t total_zone_level = 0;
+  uint64_t total_valid_zone = 0;
   if (z->open_for_write_ || !z->IsFull() || z->used_capacity_ == 0) {
     return false;
   }
@@ -700,13 +709,12 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, ZoneFile *file) {
     write_capacity += item->extent_length_;
     if (item->is_invalid_) {
       invalid_capacity += item->extent_length_;
-      if (item->file_ == file) {
-        return false;
-      }
     } else {
       if (item->file_->GetActiveZone() != nullptr) {
         return false;
       }
+      total_zone_level += (uint64_t)(item->lifetime_);
+      total_valid_zone += 1;
     }
   }
 
@@ -714,13 +722,19 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, ZoneFile *file) {
     return false;
   }
 
+  if (!is_force && !is_hot_consider) {
+    if (total_zone_level < total_valid_zone * ZONE_AVG_EXCEPT_LIFETIME) {
+      return false;
+    }
+  }
+
   return true;
 }
 
 void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list,
-                                        ZoneFile *file) {
+                                        const bool &is_force) {
   for (const auto z : io_zones) {
-    if (!ZoneValidationCheck(z, file)) {
+    if (!ZoneValidationCheck(z, is_force)) {
       continue;
     }
     victim_list->push_back(z);
