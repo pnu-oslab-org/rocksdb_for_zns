@@ -42,6 +42,7 @@
 /* Minimum of number of zones that makes sense */
 
 #define ZENFS_MIN_ZONES (32)
+#define ZONE_FILE_MIN_MIX (2)
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -70,6 +71,30 @@ Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
 
 bool Zone::IsUsed() { return (used_capacity_ > 0) || open_for_write_; }
 uint64_t Zone::GetCapacityLeft() { return capacity_; }
+double Zone::GetInvalidPercentage() {
+  uint64_t write_capacity = 0;
+  uint64_t invalid_capacity = 0;
+  for (const auto item : file_map_) {
+    write_capacity += item->extent_length_;
+    if (item->is_invalid_) {
+      invalid_capacity += item->extent_length_;
+    }
+  }
+  return ((double)invalid_capacity / write_capacity) * 100.0f;
+}
+
+double Zone::GetAvgZoneLevel() {
+  uint64_t total_files_level = 0;
+  uint64_t number_of_files = 0;
+  for (const auto item : file_map_) {
+    if (!item->is_invalid_) {
+      total_files_level += (uint64_t)(item->lifetime_);
+      number_of_files++;
+    }
+  }
+  return ((double)total_files_level / number_of_files);
+}
+
 bool Zone::IsFull() { return (capacity_ == 0); }
 bool Zone::IsEmpty() { return (wp_ == start_); }
 uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
@@ -265,6 +290,7 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   gc_thread_ = nullptr;
   gc_thread_stop_ = false;
   gc_force_ = false;
+  gc_rate_limiter_ = ZONE_GC_RATE_LIMITER;
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -469,30 +495,50 @@ void ZonedBlockDevice::GarbageCollection(const bool &is_trigger,
         (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
 
     if (is_gc) {
-      std::vector<Zone *> victim_list;
-      ZoneSelectVictim(&victim_list, is_force);
-      for (auto victim : victim_list) {
-        if (!ZoneValidationCheck(victim, is_force)) {
-          continue;
+      uint64_t processed_gc = 0;
+      int invalid_level = ZONE_INVALID_MAX;
+      while (invalid_level >= ZONE_INVALID_LOW &&
+             processed_gc <= gc_rate_limiter_) {
+        if (victim_queue_[invalid_level].empty()) {
+          ZoneSelectVictim(invalid_level, is_force);
         }
+        while (!victim_queue_[invalid_level].empty()) {
+          Zone *victim = victim_queue_[invalid_level].top();
+          assert(victim != nullptr);
+          victim_queue_[invalid_level].pop();
+          if (!ZoneVictimEnableCheck(victim, is_force)) {
+            continue;
+          }
 #ifdef ZONE_CUSTOM_DEBUG
-        if (zone_log_file_) {
-          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
-                  victim->GetZoneNr());
-          fflush(zone_log_file_);
-        }
+          if (zone_log_file_) {
+            fprintf(zone_log_file_,
+                    "%-10ld%-8s%-8lu%-8.2lf%-8.2lf%-8u%-8.2lf\n",
+                    (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
+                    victim->GetZoneNr(), victim->GetAvgZoneLevel(),
+                    victim->GetInvalidPercentage(), invalid_level,
+                    (GetNrZones() * (double)(invalid_level + 1) / 20));
+            fflush(zone_log_file_);
+          }
 #endif
-        (void)ValidDataCopy(lifetime, victim);
+          (void)ValidDataCopy(lifetime, victim);
 #ifdef ZONE_CUSTOM_DEBUG
-        if (zone_log_file_) {
-          fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                  (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
-                  victim->GetZoneNr());
-          fflush(zone_log_file_);
-        }
+          if (zone_log_file_) {
+            fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                    (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
+                    victim->GetZoneNr());
+            fflush(zone_log_file_);
+          }
 #endif
-      }
+          processed_gc++;
+          if (processed_gc > gc_rate_limiter_) {
+            break;
+          }
+        }  // victim zone processing loop
+        if (GetEmptyZones() * 20 > GetNrZones() * (invalid_level + 1)) {
+          break;
+        }
+        invalid_level--;
+      }  // invalid_level loop
     }
     files_mtx_->unlock();
   }
@@ -686,13 +732,8 @@ bool ZonedBlockDevice::GarbageCollectionSchedule(const Duration &duration) {
   });
 }
 
-bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, const bool &is_force) {
-  const bool is_hot_consider =
-      (GetEmptyZones() * 100 <= GetNrZones() * ZONE_HOT_NOT_IGNORE_PERCENT);
-  uint64_t write_capacity = 0;
-  uint64_t invalid_capacity = 0;
-  uint64_t total_zone_level = 0;
-  uint64_t total_valid_zone = 0;
+bool ZonedBlockDevice::ZoneVictimEnableCheck(Zone *z,
+                                             const bool & /*is_force */) {
   if (z->open_for_write_ || !z->IsFull() || z->used_capacity_ == 0) {
     return false;
   }
@@ -706,24 +747,7 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, const bool &is_force) {
   }
 
   for (const auto item : z->file_map_) {
-    write_capacity += item->extent_length_;
-    if (item->is_invalid_) {
-      invalid_capacity += item->extent_length_;
-    } else {
-      if (item->file_->GetActiveZone() != nullptr) {
-        return false;
-      }
-      total_zone_level += (uint64_t)(item->lifetime_);
-      total_valid_zone += 1;
-    }
-  }
-
-  if (invalid_capacity * 100 < write_capacity * ZONE_INVALID_PERCENT) {
-    return false;
-  }
-
-  if (!is_force && !is_hot_consider) {
-    if (total_zone_level < total_valid_zone * ZONE_AVG_EXCEPT_LIFETIME) {
+    if (item->file_->GetActiveZone() != nullptr) {
       return false;
     }
   }
@@ -731,13 +755,17 @@ bool ZonedBlockDevice::ZoneValidationCheck(Zone *z, const bool &is_force) {
   return true;
 }
 
-void ZonedBlockDevice::ZoneSelectVictim(std::vector<Zone *> *victim_list,
+void ZonedBlockDevice::ZoneSelectVictim(const int &invalid_level,
                                         const bool &is_force) {
   for (const auto z : io_zones) {
-    if (!ZoneValidationCheck(z, is_force)) {
+    if (!ZoneVictimEnableCheck(z, is_force)) {
       continue;
     }
-    victim_list->push_back(z);
+    if (z->GetInvalidPercentage() <
+        ((double)invalid_level / NR_ZONE_INVALID_LEVEL) * 100.0f) {
+      continue;
+    }
+    victim_queue_[invalid_level].push(z);
   }
 }
 

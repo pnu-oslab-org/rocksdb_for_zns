@@ -19,6 +19,7 @@
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <queue>
 #include <set>
 #include <string>
 #include <thread>
@@ -38,27 +40,17 @@
 #define ZONE_CUSTOM_DEBUG
 
 #define ZONE_MIX
-// #define ZONE_HOT_COLD_SEP
+#define ZONE_HOT_COLD_SEP
 
 // RESET and GC is triggered when # of Empty Zone is under 100% of total zones
-#define ZONE_RESET_TRIGGER (100)
-#define ZONE_MAX_NOTIFY_RETRY (5)
+#define ZONE_RESET_TRIGGER (25)
+#define ZONE_MAX_NOTIFY_RETRY (10)
 
-#define ZONE_FILE_MIN_MIX (2)
 #define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(100))
 #define ZONE_GC_WATERMARK \
-  (ZONE_RESET_TRIGGER)  // if you don't have 30% of empty zones, GC started
-#define ZONE_INVALID_PERCENT \
-  (50)  // GC target must be hold the over 50% invalid
-#define ZONE_AVG_EXCEPT_LIFETIME \
-  (3)  // GC target must be hold the lifetime to over 2
-#define ZONE_HOT_NOT_IGNORE_PERCENT (30)  // threshold of the Hot zone.
-#define ZONE_GC_ENABLE (1)                // is gc enable
-#define ZONE_INVALID_FILE (std::numeric_limits<uint64_t>::max())
-
-#if (ZONE_HOT_NOT_IGNORE_PERCENT > ZONE_RESET_TRIGGER)
-#error "ZONE_HOT_NOT_IGNORE_PERCENT must be lower than ZONE_RESET_TRIGGER"
-#endif
+  (ZONE_RESET_TRIGGER)      // if you don't have 30% of empty zones, GC started
+#define ZONE_GC_ENABLE (1)  // is gc enable
+#define ZONE_GC_RATE_LIMITER (10)
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")
@@ -87,6 +79,14 @@
 namespace ROCKSDB_NAMESPACE {
 
 enum class ZoneGcState { NOT_GC_TARGET, DO_RESET, NORMAL_EXIT };
+
+enum ZoneInvalidLevel {
+  ZONE_INVALID_LOW = 0,
+  ZONE_INVALID_MIDDLE,
+  ZONE_INVALID_HIGH,
+  ZONE_INVALID_MAX,
+  NR_ZONE_INVALID_LEVEL,
+};
 
 class ZonedBlockDevice;
 class ZoneFile;
@@ -137,12 +137,25 @@ class Zone {
   bool IsEmpty();
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
+  double GetInvalidPercentage();
+  double GetAvgZoneLevel();
 
   void SetZoneFile(ZoneFile *file, ZoneExtent *extent);
   void RemoveZoneFile(ZoneFile *file, ZoneExtent *extent);
   void PrintZoneFiles(FILE *fp);
 
   void CloseWR(); /* Done writing */
+};
+
+class VictimZoneCompare {
+ public:
+  bool operator()(Zone *z1, Zone *z2) {
+    // true means z2 goes to front
+    if (z1->GetAvgZoneLevel() == z2->GetAvgZoneLevel()) {
+      return z1->GetInvalidPercentage() < z2->GetInvalidPercentage();
+    }
+    return z1->GetAvgZoneLevel() < z2->GetAvgZoneLevel();
+  }
 };
 
 class ZonedBlockDevice {
@@ -174,6 +187,9 @@ class ZonedBlockDevice {
   std::mutex gc_force_mtx_;
   std::mutex gc_thread_mtx_;
   std::thread *gc_thread_;
+  std::priority_queue<Zone *, std::vector<Zone *>, VictimZoneCompare>
+      victim_queue_[NR_ZONE_INVALID_LEVEL];
+  uint64_t gc_rate_limiter_;
 
   std::mutex gc_buffer_mtx_;
 
@@ -244,8 +260,8 @@ class ZonedBlockDevice {
   void WaitUntilZoneAllocateAvail();
   template <class Duration>
   bool GarbageCollectionSchedule(const Duration &duration);
-  bool ZoneValidationCheck(Zone *z, const bool &is_force);
-  void ZoneSelectVictim(std::vector<Zone *> *victim_list, const bool &is_force);
+  bool ZoneVictimEnableCheck(Zone *z, const bool &is_force);
+  void ZoneSelectVictim(const int &invalid_level, const bool &is_force);
   ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
   ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
                                  bool finish_condition, Zone **callback_victim);
