@@ -60,11 +60,11 @@ Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
       max_capacity_(zbd_zone_capacity(z)),
       wp_(zbd_zone_wp(z)),
       open_for_write_(false),
+      lifetime_(Env::WLTH_NOT_SET),
+      used_capacity_(0),
+      reset_counter_(0),
       has_meta_(false) {
-  lifetime_ = Env::WLTH_NOT_SET;
-  used_capacity_ = 0;
   capacity_ = 0;
-  level_bits_.reset();
   if (!(zbd_zone_full(z) || zbd_zone_offline(z) || zbd_zone_rdonly(z)))
     capacity_ = zbd_zone_capacity(z) - (zbd_zone_wp(z) - zbd_zone_start(z));
 }
@@ -158,9 +158,10 @@ IOStatus Zone::Reset() {
 
 #ifdef ZONE_CUSTOM_DEBUG
   if (zbd_->GetZoneLogFile()) {
-    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8lf\n",
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8.2lf%-8lu\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "RESET", 0,
-            GetZoneNr(), (double)(total_lifetime_ / file_map_.size()));
+            GetZoneNr(), (double)(total_lifetime_ / file_map_.size()),
+            file_map_.size());
     fflush(zbd_->GetZoneLogFile());
   }
 #endif
@@ -187,7 +188,8 @@ IOStatus Zone::Reset() {
   has_meta_ = false;
 
   total_lifetime_ = 0;
-  level_bits_.reset();
+
+  reset_counter_++;
 
   return IOStatus::OK();
 }
@@ -232,7 +234,7 @@ IOStatus Zone::Close() {
   if (zbd_->GetZoneLogFile()) {
     fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-8lf\n",
             (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "MIX", 0,
-            GetZoneNr(), (double)(level_bits_.count()));
+            GetZoneNr(), GetAvgZoneLevel());
     fflush(zbd_->GetZoneLogFile());
   }
 #endif
@@ -290,7 +292,8 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
   gc_thread_ = nullptr;
   gc_thread_stop_ = false;
   gc_force_ = false;
-  gc_rate_limiter_ = ZONE_GC_RATE_LIMITER;
+  gc_rate_limiter_ = 0;
+  reset_rate_limiter_ = 0;
 };
 
 IOStatus ZonedBlockDevice::Open(bool readonly) {
@@ -434,18 +437,19 @@ void ZonedBlockDevice::GarbageCollectionThread() {
 
     is_trigger &= (current_empty_zones < previous_empty_zones);
     previous_empty_zones = current_empty_zones;
-    if (gc_force_ || is_trigger) {
+    if (is_trigger) {
       io_zones_mtx.lock();
 #ifdef ZONE_CUSTOM_DEBUG
       if (gc_force_) {
         fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
                 (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FORCED",
-                GetNrZones(), GetEmptyZones());
+                GetNrZones(), current_empty_zones);
         fflush(zone_log_file_);
       }
 #endif
       active_gc_++;
-      GarbageCollection(is_trigger, Env::WLTH_NONE, gc_force_);
+      GarbageCollection(is_trigger, Env::WLTH_NONE, gc_force_,
+                        current_empty_zones);
       io_zones_mtx.unlock();
       gc_force_ = false;
       NotifyZoneAllocateAvail();
@@ -455,7 +459,10 @@ void ZonedBlockDevice::GarbageCollectionThread() {
 
 void ZonedBlockDevice::GarbageCollection(const bool &is_trigger,
                                          const Env::WriteLifeTimeHint lifetime,
-                                         const bool &is_force) {
+                                         const bool &is_force,
+                                         const uint32_t &current_empty_zones) {
+  uint64_t processed_reset = 0;
+  uint32_t empty_zones_for_gc = 0;
   Zone *finish_victim = nullptr;
 
   if (files_mtx_ == nullptr) {  // This for zenfs
@@ -465,7 +472,7 @@ void ZonedBlockDevice::GarbageCollection(const bool &is_trigger,
 #ifdef ZONE_CUSTOM_DEBUG
   fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
           (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
-          GetNrZones(), GetEmptyZones());
+          GetNrZones(), current_empty_zones);
   fflush(zone_log_file_);
 
   if (is_trigger) {
@@ -475,73 +482,87 @@ void ZonedBlockDevice::GarbageCollection(const bool &is_trigger,
   }
 #endif
 
+  double empty_ratio = (double)current_empty_zones / GetNrZones() * 100.0f;
+
+  if (empty_ratio > 50.0f) {
+    reset_rate_limiter_ = GetNrZones() / 100;
+  } else if (empty_ratio > 40.0f) {
+    reset_rate_limiter_ = GetNrZones() / 75;
+  } else if (empty_ratio > 30.0f) {
+    reset_rate_limiter_ = GetNrZones() / 50;
+  } else if (empty_ratio > 20.0f) {
+    reset_rate_limiter_ = GetNrZones() / 25;
+  } else {
+    reset_rate_limiter_ = GetNrZones();
+  }
+
   for (const auto z : io_zones) {
-    bool reset_cond, finish_cond;
-#if defined(ZONE_MIX)
-    reset_cond = (!z->IsUsed() && is_trigger);
-    finish_cond = (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
-#else
-    reset_cond = (!z->IsUsed() && is_trigger);
-    finish_cond = (z->capacity_ > 0);
-#endif
-
-    // z->PrintZoneFiles(zone_log_file_);
-    (void)ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
-  }
-
-  if (files_mtx_->try_lock()) {
-    const bool is_gc =
-        ZONE_GC_ENABLE && (files_mtx_ != nullptr) &&
-        (GetEmptyZones() * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
-
-    if (is_gc) {
-      uint64_t processed_gc = 0;
-      int invalid_level = ZONE_INVALID_MAX;
-      while (invalid_level >= ZONE_INVALID_LOW &&
-             processed_gc <= gc_rate_limiter_) {
-        if (victim_queue_[invalid_level].empty()) {
-          ZoneSelectVictim(invalid_level, is_force);
-        }
-        while (!victim_queue_[invalid_level].empty()) {
-          Zone *victim = victim_queue_[invalid_level].top();
-          assert(victim != nullptr);
-          victim_queue_[invalid_level].pop();
-          if (!ZoneVictimEnableCheck(victim, is_force)) {
-            continue;
-          }
-#ifdef ZONE_CUSTOM_DEBUG
-          if (zone_log_file_) {
-            fprintf(zone_log_file_,
-                    "%-10ld%-8s%-8lu%-8.2lf%-8.2lf%-8u%-8.2lf\n",
-                    (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
-                    victim->GetZoneNr(), victim->GetAvgZoneLevel(),
-                    victim->GetInvalidPercentage(), invalid_level,
-                    (GetNrZones() * (double)(invalid_level + 1) / 20));
-            fflush(zone_log_file_);
-          }
-#endif
-          (void)ValidDataCopy(lifetime, victim);
-#ifdef ZONE_CUSTOM_DEBUG
-          if (zone_log_file_) {
-            fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
-                    (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
-                    victim->GetZoneNr());
-            fflush(zone_log_file_);
-          }
-#endif
-          processed_gc++;
-          if (processed_gc > gc_rate_limiter_) {
-            break;
-          }
-        }  // victim zone processing loop
-        if (GetEmptyZones() * 20 > GetNrZones() * (invalid_level + 1)) {
-          break;
-        }
-        invalid_level--;
-      }  // invalid_level loop
+    if (processed_reset > reset_rate_limiter_) {
+      break;
     }
-    files_mtx_->unlock();
+    bool reset_cond = (!z->IsUsed() && is_trigger);
+    bool finish_cond =
+        (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
+
+    processed_reset +=
+        ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
   }
+
+  empty_zones_for_gc = GetEmptyZones();
+
+  const bool is_gc =
+      ZONE_GC_ENABLE && (files_mtx_ != nullptr) &&
+      (empty_zones_for_gc * 100 <= GetNrZones() * ZONE_GC_WATERMARK);
+
+  if (!is_gc) {
+    return;
+  }
+
+  empty_ratio = (double)empty_zones_for_gc / GetNrZones() * 100.0f;
+
+  if (!files_mtx_->try_lock()) {
+    return;
+  }
+  int invalid_level = ZONE_INVALID_MAX;
+  while (invalid_level >= ZONE_INVALID_LOW) {
+    if (victim_queue_[invalid_level].empty()) {
+      ZoneSelectVictim(invalid_level, is_force);
+    }
+    while (!victim_queue_[invalid_level].empty()) {
+      Zone *victim = victim_queue_[invalid_level].top();
+      assert(victim != nullptr);
+      victim_queue_[invalid_level].pop();
+      if (!ZoneVictimEnableCheck(victim, is_force)) {
+        continue;
+      }
+#ifdef ZONE_CUSTOM_DEBUG
+      if (zone_log_file_) {
+        fprintf(zone_log_file_, "%-10ld%-8s%-8lu%-8.2lf%-8.2lf%-8u%-8.2lf\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_S",
+                victim->GetZoneNr(), victim->GetAvgZoneLevel(),
+                victim->GetInvalidPercentage(), invalid_level,
+                (GetNrZones() * (double)(invalid_level + 1) / 20));
+        fflush(zone_log_file_);
+      }
+#endif
+      (void)ValidDataCopy(lifetime, victim);
+#ifdef ZONE_CUSTOM_DEBUG
+      if (zone_log_file_) {
+        fprintf(zone_log_file_, "%-10ld%-8s%-8lu\n",
+                (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "GC_E",
+                victim->GetZoneNr());
+        fflush(zone_log_file_);
+      }
+#endif
+    }  // victim zone processing loop
+    empty_zones_for_gc = GetEmptyZones();
+    empty_ratio = (double)empty_zones_for_gc / GetNrZones() * 100.0f;
+    if (empty_ratio > 5.0f) {
+      break;
+    }
+    invalid_level--;
+  }  // invalid level loop
+  files_mtx_->unlock();
 }
 
 void ZonedBlockDevice::NotifyIOZoneFull() {
@@ -832,7 +853,6 @@ IOStatus ZonedBlockDevice::CopyDataToFile(const ZoneMapEntry *item,
 
 ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
                                             Zone *z) {
-  gc_buffer_mtx_.lock();
   int ret = 0;
   std::vector<std::pair<ZoneFile *, uint64_t>> gc_list;
   assert(0 != z->file_map_.size());
@@ -920,20 +940,19 @@ ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
   }
   z->used_capacity_ = 0;
   assert(IOStatus::OK() == z->Reset());
-  gc_buffer_mtx_.unlock();
 
   return ZoneGcState::NORMAL_EXIT;
 }
 
 /* Except for NORMAL_EXIT, all states must arise "continue" operation after
  * this method */
-ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
-                                                 bool finish_condition,
-                                                 Zone **callback_victim) {
+uint64_t ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
+                                              bool finish_condition,
+                                              Zone **callback_victim) {
   Status s;
   Zone *finish_victim = nullptr;
   if (z->open_for_write_ || z->IsEmpty() || (z->IsFull() && z->IsUsed()))
-    return ZoneGcState::NOT_GC_TARGET;
+    return 0;
 
   if (reset_condition) {
     if (!z->IsFull()) active_io_zones_--;
@@ -942,7 +961,7 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
     if (!s.ok()) {
       Debug(logger_, "Failed resetting zone !");
     }
-    return ZoneGcState::DO_RESET;
+    return 1;
   }
 
   if (finish_condition) {
@@ -964,7 +983,7 @@ ZoneGcState ZonedBlockDevice::ZoneResetAndFinish(Zone *z, bool reset_condition,
   }
 
   *callback_victim = finish_victim;
-  return ZoneGcState::NORMAL_EXIT;
+  return 0;
 }
 
 int ZonedBlockDevice::AllocateEmptyZone(unsigned int best_diff,
@@ -973,6 +992,7 @@ int ZonedBlockDevice::AllocateEmptyZone(unsigned int best_diff,
                                         Env::WriteLifeTimeHint lifetime) {
   Status s;
   int new_zone = 0;
+  Zone *selected_zone = nullptr;
 
   /* If we did not find a good match, allocate an empty one */
   if (best_diff < LIFETIME_DIFF_NOT_GOOD) {
@@ -992,14 +1012,19 @@ int ZonedBlockDevice::AllocateEmptyZone(unsigned int best_diff,
   if (active_io_zones_.load() < max_nr_active_io_zones_) {
     for (const auto z : io_zones) {
       if ((!z->open_for_write_) && z->IsEmpty()) {
-        z->lifetime_ = lifetime;
-        *allocated_zone = z;
-        active_io_zones_++;
-        new_zone = 1;
+        selected_zone = z;
         break;
       }
     }  // end of for
+
+    if (selected_zone) {
+      selected_zone->lifetime_ = lifetime;
+      *allocated_zone = selected_zone;
+      active_io_zones_++;
+      new_zone = 1;
+    }
   }
+
   return new_zone;
 }  // namespace ROCKSDB_NAMESPACE
 
@@ -1020,24 +1045,16 @@ int ZonedBlockDevice::GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
   for (const auto z : io_zones) {
     if ((!z->open_for_write_) && (z->used_capacity_ > 0) && !z->IsFull()) {
 #if defined(ZONE_HOT_COLD_SEP)
-#pragma message("HOT COLD SEP CODE ENABLE")
       (void)best_diff;
       (void)lifetime;
 
       bool is_same_level = true;
 
-      for (const auto item : z->file_map_) {
-        if (item->lifetime_ != file->GetWriteLifeTimeHint()) {
-          is_same_level = false;
-          break;
-        }
-
-        if (GetZoneFileExt(file->GetFilename()) !=
-            GetZoneFileExt(item->filename_)) {
-          is_same_level = false;
-          break;
-        }
+      if (z->total_lifetime_ !=
+          file->GetWriteLifeTimeHint() * z->file_map_.size()) {
+        is_same_level = false;
       }
+
       if (is_same_level) {
         best_diff = 0;
         *allocated_zone = z;
@@ -1065,11 +1082,7 @@ Zone *ZonedBlockDevice::AllocateZoneImpl(Env::WriteLifeTimeHint lifetime,
   /* Make sure we are below the zone open limit */
   WaitUntilZoneOpenAvail();
 
-#if defined(ZONE_MIX)
   best_diff = GetAlreadyOpenZone(&allocated_zone, file, lifetime);
-#else
-  best_diff = LIFETIME_DIFF_NOT_GOOD;
-#endif
   new_zone =
       AllocateEmptyZone(best_diff, finish_victim, &allocated_zone, lifetime);
 
@@ -1113,7 +1126,6 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
 
   allocated_zone->total_lifetime_ =
       (allocated_zone->total_lifetime_ + file->GetWriteLifeTimeHint());
-  allocated_zone->level_bits_.set(file->GetWriteLifeTimeHint(), true);
 
   return allocated_zone;
 }

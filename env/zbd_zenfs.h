@@ -39,18 +39,15 @@
 
 #define ZONE_CUSTOM_DEBUG
 
-#define ZONE_MIX
-#define ZONE_HOT_COLD_SEP
+// #define ZONE_HOT_COLD_SEP
 
-// RESET and GC is triggered when # of Empty Zone is under 100% of total zones
-#define ZONE_RESET_TRIGGER (25)
+#define ZONE_RESET_TRIGGER (75)  // under 25% of empty zones, RESET started
+#define ZONE_GC_WATERMARK (25)   // under 25% of empty zones, GC started
+
 #define ZONE_MAX_NOTIFY_RETRY (10)
 
-#define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(100))
-#define ZONE_GC_WATERMARK \
-  (ZONE_RESET_TRIGGER)      // if you don't have 30% of empty zones, GC started
+#define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(1000))
 #define ZONE_GC_ENABLE (1)  // is gc enable
-#define ZONE_GC_RATE_LIMITER (10)
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")
@@ -122,8 +119,8 @@ class Zone {
   bool open_for_write_;
   Env::WriteLifeTimeHint lifetime_;
   double total_lifetime_;
-  std::bitset<16> level_bits_;
   std::atomic<long> used_capacity_;
+  std::atomic<uint64_t> reset_counter_;
   std::vector<ZoneMapEntry *> file_map_;
   bool has_meta_;
 
@@ -190,8 +187,7 @@ class ZonedBlockDevice {
   std::priority_queue<Zone *, std::vector<Zone *>, VictimZoneCompare>
       victim_queue_[NR_ZONE_INVALID_LEVEL];
   uint64_t gc_rate_limiter_;
-
-  std::mutex gc_buffer_mtx_;
+  uint64_t reset_rate_limiter_;
 
   FILE *zone_log_file_;
   char *gc_buffer_;
@@ -251,7 +247,8 @@ class ZonedBlockDevice {
   void GarbageCollectionThread(void);
   void GarbageCollection(const bool &is_trigger,
                          const Env::WriteLifeTimeHint lifetime,
-                         const bool &is_force);
+                         const bool &is_force,
+                         const uint32_t &current_empty_zones);
   Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
                            ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
@@ -263,8 +260,9 @@ class ZonedBlockDevice {
   bool ZoneVictimEnableCheck(Zone *z, const bool &is_force);
   void ZoneSelectVictim(const int &invalid_level, const bool &is_force);
   ZoneGcState ValidDataCopy(Env::WriteLifeTimeHint lifetime, Zone *z);
-  ZoneGcState ZoneResetAndFinish(Zone *z, bool reset_condition,
-                                 bool finish_condition, Zone **callback_victim);
+  uint64_t ZoneResetAndFinish(Zone *z, bool reset_condition,
+                              bool finish_condition, Zone **callback_victim);
+
   int AllocateEmptyZone(unsigned int best_diff, Zone *finish_victim,
                         Zone **allocated_zone, Env::WriteLifeTimeHint lifetime);
   int GetAlreadyOpenZone(Zone **allocated_zone, ZoneFile *file,
