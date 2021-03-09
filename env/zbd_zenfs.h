@@ -39,9 +39,10 @@
 
 #define ZONE_CUSTOM_DEBUG
 
-// #define ZONE_HOT_COLD_SEP
+#define ZONE_HOT_COLD_SEP
+#define ZONE_USE_RESET_RATE_LIMITER
 
-#define ZONE_RESET_TRIGGER (75)  // under 25% of empty zones, RESET started
+#define ZONE_RESET_TRIGGER (25)  // under 25% of empty zones, RESET started
 #define ZONE_GC_WATERMARK (25)   // under 25% of empty zones, GC started
 
 #define ZONE_MAX_NOTIFY_RETRY (10)
@@ -135,7 +136,8 @@ class Zone {
   uint64_t GetZoneNr();
   uint64_t GetCapacityLeft();
   double GetInvalidPercentage();
-  double GetAvgZoneLevel();
+  double GetZoneValidAvgLevel();
+  double GetZoneAvgLevel();
 
   void SetZoneFile(ZoneFile *file, ZoneExtent *extent);
   void RemoveZoneFile(ZoneFile *file, ZoneExtent *extent);
@@ -148,10 +150,18 @@ class VictimZoneCompare {
  public:
   bool operator()(Zone *z1, Zone *z2) {
     // true means z2 goes to front
-    if (z1->GetAvgZoneLevel() == z2->GetAvgZoneLevel()) {
+    if (z1->GetZoneValidAvgLevel() == z2->GetZoneValidAvgLevel()) {
       return z1->GetInvalidPercentage() < z2->GetInvalidPercentage();
     }
-    return z1->GetAvgZoneLevel() < z2->GetAvgZoneLevel();
+    return z1->GetZoneValidAvgLevel() < z2->GetZoneValidAvgLevel();
+  }
+};
+
+class EmptyZoneCompare {
+ public:
+  bool operator()(Zone *z1, Zone *z2) {
+    // true means z2 goes to front
+    return z1->reset_counter_ > z2->reset_counter_;
   }
 };
 
@@ -195,7 +205,8 @@ class ZonedBlockDevice {
   unsigned int max_nr_active_io_zones_;
   unsigned int max_nr_open_io_zones_;
 
-  Zone *AllocateZoneImpl(Env::WriteLifeTimeHint lifetime, ZoneFile *file);
+  Zone *AllocateZoneImpl(Env::WriteLifeTimeHint lifetime, ZoneFile *file,
+                         int *is_empty);
 
  public:
   explicit ZonedBlockDevice(std::string bdevname,
@@ -203,6 +214,11 @@ class ZonedBlockDevice {
   virtual ~ZonedBlockDevice();
 
   std::mutex *files_mtx_;
+
+  // below 2 member only for zone allocation
+  std::vector<Zone *> occupied_zones_[Env::WLTH_EXTREME + 1];
+  std::priority_queue<Zone *, std::vector<Zone *>, EmptyZoneCompare>
+      empty_zones_queue_;
 
   IOStatus Open(bool readonly = false);
 
@@ -245,10 +261,10 @@ class ZonedBlockDevice {
 
  private:
   void GarbageCollectionThread(void);
-  void GarbageCollection(const bool &is_trigger,
-                         const Env::WriteLifeTimeHint lifetime,
-                         const bool &is_force,
-                         const uint32_t &current_empty_zones);
+  uint32_t GarbageCollection(const bool &is_trigger,
+                             const Env::WriteLifeTimeHint lifetime,
+                             const bool &is_force,
+                             const uint32_t &current_empty_zones);
   Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
                            ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
