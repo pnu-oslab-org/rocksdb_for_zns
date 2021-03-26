@@ -29,6 +29,10 @@ echo deadline > /sys/class/block/$DEV/queue/scheduler
 NR_PROC=$(expr $(nproc) / 2)
 
 ./zenfs mkfs --zbd=$DEV --aux_path=/tmp/zenfs_$DEV --finish_threshold=$FUZZ --force
+
+echo "Press any key to procede"
+read
+
 ./db_bench \
     --fs_uri=zenfs://dev:$DEV \
     --key_size=16 \
@@ -66,6 +70,5 @@ NR_PROC=$(expr $(nproc) / 2)
 #   -sine_d=4500 \
 #   --perf_level=2 \
 #   -reads=420000000 \
-#   -num=50000000 \
-#   -key_size=48
-#
+#   -num=$NR_KEYS \
+#   -key_size=48 \

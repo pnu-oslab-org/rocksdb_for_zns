@@ -42,8 +42,9 @@
 #define ZONE_HOT_COLD_SEP
 #define ZONE_USE_RESET_RATE_LIMITER
 
-#define ZONE_RESET_TRIGGER (25)  // under 25% of empty zones, RESET started
-#define ZONE_GC_WATERMARK (25)   // under 25% of empty zones, GC started
+#define ZONE_RESET_TRIGGER (25)  // under 25% of free space, RESET started
+#define ZONE_GC_WATERMARK (10)   // under 10% of free space, GC started
+#define ZONE_GC_NO_LIMIT (5)     // under 5% of free space, no limit execute
 
 #define ZONE_MAX_NOTIFY_RETRY (10)
 
@@ -264,7 +265,7 @@ class ZonedBlockDevice {
   uint32_t GarbageCollection(const bool &is_trigger,
                              const Env::WriteLifeTimeHint lifetime,
                              const bool &is_force,
-                             const uint32_t &current_empty_zones);
+                             const uint64_t &current_empty_space);
   Slice ReadDataFromExtent(const ZoneMapEntry *item, char *scratch,
                            ZoneExtent **target_extent);
   IOStatus CopyDataToFile(const ZoneMapEntry *item, Slice &source,
