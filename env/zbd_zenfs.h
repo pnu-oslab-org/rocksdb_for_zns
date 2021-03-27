@@ -37,14 +37,14 @@
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
 
-#define ZONE_CUSTOM_DEBUG
+// #define ZONE_CUSTOM_DEBUG
 
 #define ZONE_HOT_COLD_SEP
-#define ZONE_USE_RESET_RATE_LIMITER
+// #define ZONE_USE_RESET_RATE_LIMITER
+#define ZONE_USE_RESET_SIGMOID_LIMITER
 
-#define ZONE_RESET_TRIGGER (25)  // under 25% of free space, RESET started
-#define ZONE_GC_WATERMARK (10)   // under 10% of free space, GC started
-#define ZONE_GC_NO_LIMIT (5)     // under 5% of free space, no limit execute
+#define ZONE_RESET_TRIGGER (100)  // under 100% of free space, RESET started
+#define ZONE_GC_WATERMARK (25)    // under 25% of free space, GC started
 
 #define ZONE_MAX_NOTIFY_RETRY (10)
 
@@ -73,6 +73,14 @@
 #pragma message("ZONE_MIX mode enabled")
 #else
 #pragma message("ZONE_MIX mode disabled")
+#endif
+
+#if defined(ZONE_USE_RESET_RATE_LIMITER)
+#pragma message("fixed reset rate limiter mode enabled")
+#elif defined(ZONE_USE_RESET_SIGMOID_LIMITER)
+#pragma message("sigmoid reset rate limiter mode enabled")
+#else
+#pragma message("no reset rate limiter mode enabled")
 #endif
 
 namespace ROCKSDB_NAMESPACE {

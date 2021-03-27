@@ -462,9 +462,9 @@ void ZonedBlockDevice::GarbageCollectionThread() {
       io_zones_mtx.lock();
 #ifdef ZONE_CUSTOM_DEBUG
       if (gc_force_) {
-        fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8lu\n",
+        fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
                 (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "FORCED",
-                GetNrZones(), current_free_space);
+                GetNrZones(), GetEmptyZones());
         fflush(zone_log_file_);
       }
 #endif
@@ -493,9 +493,9 @@ uint32_t ZonedBlockDevice::GarbageCollection(
   }
 
 #ifdef ZONE_CUSTOM_DEBUG
-  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8lu\n",
+  fprintf(zone_log_file_, "%-10ld%-8s%-8u%-8u\n",
           (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "REMAIN",
-          GetNrZones(), current_empty_space);
+          GetNrZones(), GetEmptyZones());
   fflush(zone_log_file_);
 
   if (is_trigger) {
@@ -506,8 +506,8 @@ uint32_t ZonedBlockDevice::GarbageCollection(
 #endif
 
   double empty_ratio = (double)current_empty_space / total_space * 100.0f;
+#if defined(ZONE_USE_RESET_RATE_LIMITER)
 
-#ifdef ZONE_USE_RESET_RATE_LIMITER
   if (empty_ratio > 20.0f) {
     reset_rate_limiter_ = GetNrZones() / 100;
   } else if (empty_ratio > 15.0f) {
@@ -519,6 +519,9 @@ uint32_t ZonedBlockDevice::GarbageCollection(
   } else {
     reset_rate_limiter_ = GetNrZones();
   }
+#elif defined(ZONE_USE_RESET_SIGMOID_LIMITER)
+  reset_rate_limiter_ =
+      (int)(GetNrZones() * (1 / (double)(1 + GetEmptyZones())));
 #else
   reset_rate_limiter_ = GetNrZones();
 #endif
@@ -548,10 +551,9 @@ uint32_t ZonedBlockDevice::GarbageCollection(
     return GetEmptyZones();
   }
 
-  empty_ratio = (double)empty_zones_for_gc / total_space * 100.0f;
-
   files_mtx_->lock();
   int invalid_level = ZONE_INVALID_MAX;
+  int valid_level = ZONE_INVALID_LOW;
   while (invalid_level >= ZONE_INVALID_LOW) {
     if (victim_queue_[invalid_level].empty()) {
       ZoneSelectVictim(invalid_level, is_force);
@@ -584,9 +586,12 @@ uint32_t ZonedBlockDevice::GarbageCollection(
 #endif
     }  // victim zone processing loop
     empty_zones_for_gc = GetFreeSpace();
-    empty_ratio = (double)empty_zones_for_gc / total_space * 100.0f;
+    empty_ratio = ((double)empty_zones_for_gc / total_space * 100.0f);
 
-    if (empty_ratio > ZONE_GC_NO_LIMIT) {
+    valid_level = (int)((NR_ZONE_INVALID_LEVEL - 1) * 1 /
+                        (double)(1 + empty_ratio / 5.0f));
+
+    if (NR_ZONE_INVALID_LEVEL - invalid_level > valid_level) {
       break;
     }
     invalid_level--;
@@ -1154,20 +1159,35 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
         NotifyGarbageCollectionRun();
         std::this_thread::yield();
       } else {
-        uint32_t before = GetEmptyZones();
-        std::cout << "Bomb!" << std::endl;
-        for (int i = 0; i < Env::WLTH_EXTREME + 1; i++) {
-          std::vector<Zone *> *zones = &occupied_zones_[i];
-          Zone *finish_victim = nullptr;
-          for (auto z : *zones) {
-            bool reset_cond = (!z->IsUsed());
-            bool finish_cond =
-                (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
+        Zone *selected_zone = nullptr;
+        Zone *finish_victim = nullptr;
+        for (auto z : io_zones) {
+          bool reset_cond = (!z->IsUsed());
+          bool finish_cond =
+              (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
 
-            ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
+          ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
+        }
+
+        if (active_io_zones_.load() == max_nr_active_io_zones_ &&
+            finish_victim != nullptr) {
+          Status s = finish_victim->Finish();
+          if (!s.ok()) {
+            Debug(logger_, "Failed finishing zone");
           }
-        }  // forced reset sequence
-        assert(before != GetEmptyZones());
+          active_io_zones_--;
+        }
+
+        if (active_io_zones_.load() < max_nr_active_io_zones_) {
+          for (auto z : io_zones) {
+            if ((!z->open_for_write_) && z->IsEmpty()) {
+              selected_zone = z;
+              break;
+            }
+          }
+        }
+
+        assert(selected_zone != nullptr);
       }  // gc_thread check
     }    // is zone allocated
   } while (!allocated_zone);
