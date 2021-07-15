@@ -37,7 +37,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
 
-// #define ZONE_CUSTOM_DEBUG
+#define ZONE_CUSTOM_DEBUG
 
 #define ZONE_HOT_COLD_SEP
 // #define ZONE_USE_RESET_RATE_LIMITER
@@ -132,6 +132,9 @@ class Zone {
   std::atomic<long> used_capacity_;
   std::atomic<uint64_t> reset_counter_;
   std::vector<ZoneMapEntry *> file_map_;
+#ifdef ZONE_CUSTOM_DEBUG
+  std::atomic<uint64_t> file_map_size_;
+#endif
   bool has_meta_;
 
   IOStatus Reset();

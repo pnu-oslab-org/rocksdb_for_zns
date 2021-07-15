@@ -18,6 +18,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>    // remove after
+#include <fstream>   // remove after
+#include <iostream>  // remove after
 #include <string>
 #include <utility>
 #include <vector>
@@ -365,8 +368,20 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
   uint32_t wr_size, offset = 0;
   IOStatus s;
 
+  //  static std::fstream fs;
+  //  if (!fs.is_open()) {
+  //    fs.open("gab.txt", std::fstream::out);
+  //  }
+  //
   if (active_zone_ == NULL) {
+    //    auto start = std::chrono::system_clock::now();
     active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL);
+    //    auto end = std::chrono::system_clock::now();
+    //    fs << "new\t"
+    //       << std::chrono::duration_cast<std::chrono::microseconds>(end -
+    //       start)
+    //              .count()
+    //       << "\tus" << std::endl;
     if (!active_zone_) {
       return IOStatus::NoSpace("Zone allocation failure\n");
     }
@@ -383,7 +398,14 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
       PushExtent();
 
       active_zone_->CloseWR();
+      //      auto start = std::chrono::system_clock::now();
       active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_);
+      //      auto end = std::chrono::system_clock::now();
+      //      fs << "exh\t"
+      //         << std::chrono::duration_cast<std::chrono::microseconds>(end -
+      //         start)
+      //                .count()
+      //         << "\tus" << std::endl;
       if (!active_zone_) {
         return IOStatus::NoSpace("Zone allocation failure\n");
       }

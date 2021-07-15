@@ -21,7 +21,8 @@ echo "TARGET_FZ_BASE=$TARGET_FZ_BASE bytes"
 echo "TARGET_FILE_SIZE_MULTIPLIER=$TARGET_FILE_SIZE_MULTIPLIER"
 echo "MAX_BYTES_FOR_LEVEL_BASE=$MAX_BYTES_FOR_LEVEL_BASE bytes"
 
-NR_KEYS=5000000
+# test must be executed based on the 6,000,000
+NR_KEYS=6000000
 #NR_KEYS=1000000
 
 echo deadline > /sys/class/block/$DEV/queue/scheduler
@@ -46,6 +47,7 @@ read
     --num=$NR_KEYS \
     --benchmarks=fillseq,overwrite
 
+ls -t1 *.log  | head -n 1 | xargs -i mv {} {}.${NR_KEYS}.$(date +%s)
 # ./db_bench \
 #    --fs_uri=zenfs://dev:$DEV \
 #   --benchmarks=mixgraph \

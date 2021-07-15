@@ -65,6 +65,7 @@ Zone::Zone(ZonedBlockDevice *zbd, struct zbd_zone *z)
       reset_counter_(0),
       has_meta_(false) {
   capacity_ = 0;
+  file_map_size_ = 0;
   if (!(zbd_zone_full(z) || zbd_zone_offline(z) || zbd_zone_rdonly(z)))
     capacity_ = zbd_zone_capacity(z) - (zbd_zone_wp(z) - zbd_zone_start(z));
 }
@@ -114,7 +115,12 @@ void Zone::SetZoneFile(ZoneFile *file, ZoneExtent *extent) {
   if (!is_sst && !is_log) {
     has_meta_ = true;
   }
-  file_map_.push_back(new ZoneMapEntry(file, extent));
+  ZoneMapEntry *entry = new ZoneMapEntry(file, extent);
+  assert(nullptr != entry);
+  file_map_.push_back(entry);
+#ifdef ZONE_CUSTOM_DEBUG
+  file_map_size_ += sizeof(*entry);
+#endif
 }
 
 void Zone::RemoveZoneFile(ZoneFile *file, ZoneExtent *extent) {
@@ -190,7 +196,20 @@ IOStatus Zone::Reset() {
   for (const auto item : file_map_) {
     free(item);
   }
+
+#ifdef ZONE_CUSTOM_DEBUG
+  if (zbd_->GetZoneLogFile()) {
+    uint64_t size = file_map_size_;
+    fprintf(zbd_->GetZoneLogFile(), "%-10ld%-8s%-8d%-8lu%-16lu\n",
+            (long int)((double)clock() / CLOCKS_PER_SEC * 1000), "PUSH", 0,
+            GetZoneNr(), size);
+    fflush(zbd_->GetZoneLogFile());
+  }
+#endif
   file_map_.clear();
+#ifdef ZONE_CUSTOM_DEBUG
+  file_map_size_ = 0;
+#endif
   has_meta_ = false;
 
   total_lifetime_ = 0;
