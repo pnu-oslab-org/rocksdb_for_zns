@@ -162,7 +162,6 @@ void Zone::CloseWR() {
 
 IOStatus Zone::Reset() {
   size_t zone_sz = zbd_->GetZoneSize();
-  int fd = zbd_->GetWriteFD();
   unsigned int report = 1;
   struct zbd_zone z;
   int ret;
@@ -178,10 +177,11 @@ IOStatus Zone::Reset() {
   }
 #endif
 
-  ret = zbd_reset_zones(fd, start_, zone_sz);
+  ret = zbd_reset_zones(zbd_->GetWriteFD(), start_, zone_sz);
   if (ret) return IOStatus::IOError("Zone reset failed\n");
 
-  ret = zbd_report_zones(fd, start_, zone_sz, ZBD_RO_ALL, &z, &report);
+  ret = zbd_report_zones(zbd_->GetReadFD(), start_, zone_sz, ZBD_RO_ALL, &z,
+                         &report);
 
   if (ret || (report != 1)) return IOStatus::IOError("Zone report failed\n");
 
@@ -336,7 +336,7 @@ ZonedBlockDevice::ZonedBlockDevice(std::string bdevname,
 IOStatus ZonedBlockDevice::Open(bool readonly) {
   struct zbd_zone *zone_rep;
   unsigned int reported_zones;
-  size_t addr_space_sz;
+  uint64_t addr_space_sz;
   zbd_info info;
   Status s;
   uint64_t i = 0;
@@ -349,8 +349,8 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
     return IOStatus::InvalidArgument("Failed to open zoned block device");
   }
 
-  read_direct_f_ = zbd_open(filename_.c_str(), O_RDONLY, &info);
-  if (read_f_ < 0) {
+  read_direct_f_ = zbd_open(filename_.c_str(), O_RDONLY | O_DIRECT, &info);
+  if (read_direct_f_ < 0) {
     return IOStatus::InvalidArgument("Failed to open zoned block device");
   }
 

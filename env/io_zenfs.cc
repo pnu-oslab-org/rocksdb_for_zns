@@ -270,10 +270,9 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
 
     if ((pread_sz + r_off) > extent_end) pread_sz = extent_end - r_off;
 
-    if (direct) {
-      assert((uint64_t)ptr % GetBlockSize() == 0);
-      assert(pread_sz % GetBlockSize() == 0);
-      assert(r_off % GetBlockSize() == 0);
+    bool aligned = (pread_sz % zbd_->GetBlockSize() == 0);
+
+    if (direct && aligned) {
       r = pread(f_direct, ptr, pread_sz, r_off);
     } else {
       r = pread(f, ptr, pread_sz, r_off);
@@ -456,7 +455,7 @@ ZonedWritableFile::ZonedWritableFile(ZonedBlockDevice* zbd, bool _buffered,
   zoneFile_ = zoneFile;
 
   if (buffered) {
-    int ret = posix_memalign((void**)&buffer, block_sz, buffer_sz);
+    int ret = posix_memalign((void**)&buffer, sysconf(_SC_PAGESIZE), buffer_sz);
 
     if (ret) buffer = nullptr;
 
@@ -579,7 +578,7 @@ IOStatus ZonedWritableFile::BufferedWrite(const Slice& slice) {
     blocks = data_left / block_sz;
     aligned_sz = block_sz * blocks;
 
-    ret = posix_memalign(&alignbuf, block_sz, aligned_sz);
+    ret = posix_memalign(&alignbuf, sysconf(_SC_PAGESIZE), aligned_sz);
     if (ret) {
       return IOStatus::IOError("failed allocating alignment write buffer\n");
     }

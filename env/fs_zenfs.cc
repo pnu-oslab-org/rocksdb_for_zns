@@ -40,7 +40,7 @@ IOStatus ZenMetaLog::AddRecord(const Slice& slice) {
   assert(data != nullptr);
   assert((phys_sz % bs_) == 0);
 
-  ret = posix_memalign((void**)&buffer, bs_, phys_sz);
+  ret = posix_memalign((void**)&buffer, sysconf(_SC_PAGESIZE), phys_sz);
   if (ret) return IOStatus::IOError("Failed to allocate memory");
 
   memset(buffer, 0, phys_sz);
@@ -311,12 +311,20 @@ IOStatus ZenFS::SyncFileMetadata(ZoneFile* zoneFile) {
   return s;
 }
 
-ZoneFile* ZenFS::GetFile(std::string fname) {
+ZoneFile* ZenFS::GetFileInternal(std::string fname) {
   ZoneFile* zoneFile = nullptr;
-  files_mtx_.lock();
+
   if (files_.find(fname) != files_.end()) {
     zoneFile = files_[fname];
   }
+
+  return zoneFile;
+}
+
+ZoneFile* ZenFS::GetFile(std::string fname) {
+  ZoneFile* zoneFile = nullptr;
+  files_mtx_.lock();
+  zoneFile = GetFileInternal(fname);
   files_mtx_.unlock();
   return zoneFile;
 }
@@ -325,7 +333,7 @@ IOStatus ZenFS::DeleteFile(std::string fname) {
   ZoneFile* zoneFile = nullptr;
   IOStatus s;
 
-  zoneFile = GetFile(fname);
+  zoneFile = GetFileInternal(fname);
   files_mtx_.lock();
   if (zoneFile != nullptr) {
     std::string record;
@@ -400,11 +408,19 @@ IOStatus ZenFS::NewWritableFile(const std::string& fname,
 
   zoneFile = new ZoneFile(zbd_, fname, next_file_id_++);
 
+  /* Persist the creation of the file */
+  s = SyncFileMetadata(zoneFile);
+  if (!s.ok()) {
+    delete zoneFile;
+    return s;
+  }
+
   files_mtx_.lock();
   files_.insert(std::make_pair(fname.c_str(), zoneFile));
   files_mtx_.unlock();
 
-  result->reset(new ZonedWritableFile(zbd_, true, zoneFile, &metadata_writer_));
+  result->reset(new ZonedWritableFile(zbd_, !file_opts.use_direct_writes,
+                                      zoneFile, &metadata_writer_));
 
   return s;
 }
@@ -646,8 +662,11 @@ Status ZenFS::RecoverFrom(ZenMetaLog* log) {
 
     if (!GetFixed32(&record, &tag)) break;
 
-    if (!GetLengthPrefixedSlice(&record, &data))
+    if (tag == kEndRecord) break;
+
+    if (!GetLengthPrefixedSlice(&record, &data)) {
       return Status::Corruption("ZenFS", "No recovery record data");
+    }
 
     switch (tag) {
       case kCompleteFilesSnapshot:

@@ -29,6 +29,7 @@ echo deadline > /sys/class/block/$DEV/queue/scheduler
 
 NR_PROC=$(expr $(nproc) / 2)
 
+rm -rf /tmp/zenfs_$DEV
 ./zenfs mkfs --zbd=$DEV --aux_path=/tmp/zenfs_$DEV --finish_threshold=$FUZZ --force
 
 echo "Press any key to procede"
