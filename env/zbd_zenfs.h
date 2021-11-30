@@ -39,17 +39,43 @@
 
 #define ZONE_CUSTOM_DEBUG
 
-#define ZONE_HOT_COLD_SEP
-// #define ZONE_USE_RESET_RATE_LIMITER
+// #define ORIGINAL
+// #define ORIGINAL_GC
+#define HOT_COLD
+// #define HOT_COLD_GC
+
+#ifdef ORIGINAL
+#define ZONE_NO_GC_THREAD
+#define ZONE_GC_ENABLE (0)  // is gc enable
+#endif
+
+#ifdef ORIGINAL_GC
+#define ZONE_USE_RESET_RATE_LIMITER
 #define ZONE_USE_RESET_SIGMOID_LIMITER
+#define ZONE_GC_ENABLE (1)  // is gc enable
+#endif
+
+#ifdef HOT_COLD
+#define ZONE_HOT_COLD_SEP
+#define ZONE_NO_GC_THREAD
+#define ZONE_GC_ENABLE (0)  // is gc enable
+#endif
+
+#ifdef HOT_COLD_GC
+#define ZONE_HOT_COLD_SEP
+#define ZONE_USE_RESET_RATE_LIMITER
+#define ZONE_USE_RESET_SIGMOID_LIMITER
+#define ZONE_GC_ENABLE (1)  // is gc enable
+#endif
 
 #define ZONE_RESET_TRIGGER (100)  // under 100% of free space, RESET started
 #define ZONE_GC_WATERMARK (25)    // under 25% of free space, GC started
 
+#define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(1000))
+
 #define ZONE_MAX_NOTIFY_RETRY (10)
 
-#define ZONE_GC_THREAD_TICK (std::chrono::milliseconds(1000))
-#define ZONE_GC_ENABLE (1)  // is gc enable
+//#define ZONE_TIME_CHECK
 
 #if defined(ZONE_CUSTOM_DEBUG)
 #pragma message("ZONE CUSTOM DEBUG mode enabled")

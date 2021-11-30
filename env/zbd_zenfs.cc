@@ -376,10 +376,16 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   zone_sz_ = info.zone_size;
   nr_zones_ = info.nr_zones;
 
-#if defined(ZONE_HOT_COLD_SEP)
-  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_sep.log";
+#if defined(ORIGINAL)
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_original.log";
+#elif defined(ORIGINAL_GC)
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_original_gc.log";
+#elif defined(HOT_COLD)
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_hot_cold.log";
+#elif defined(HOT_COLD_GC)
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_hot_cold_gc.log";
 #else
-  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_no_sep.log";
+  sstr << "zone_e" << ZONE_RESET_TRIGGER << "_unknown.log";
 #endif
 
 #ifdef ZONE_CUSTOM_DEBUG
@@ -458,9 +464,11 @@ IOStatus ZonedBlockDevice::Open(bool readonly) {
   free(zone_rep);
   start_time_ = time(NULL);
 
+#if !defined(ZONE_NO_GC_THREAD)
   gc_thread_ =
       new std::thread(&ZonedBlockDevice::GarbageCollectionThread, this);
   assert(nullptr != gc_thread_);
+#endif
 
   return IOStatus::OK();
 }
@@ -906,7 +914,6 @@ IOStatus ZonedBlockDevice::CopyDataToFile(const ZoneMapEntry *item,
 
 ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
                                             Zone *z) {
-  int ret = 0;
   std::vector<std::pair<ZoneFile *, uint64_t>> gc_list;
   assert(0 != z->file_map_.size());
   assert(!z->open_for_write_);
@@ -916,8 +923,7 @@ ZoneGcState ZonedBlockDevice::ValidDataCopy(Env::WriteLifeTimeHint /*lifetime*/,
   /* generate some buffer for GC */
   if (!gc_buffer_) {
     assert(zone_sz_ % block_sz_ == 0);
-    ret = posix_memalign((void **)&gc_buffer_, block_sz_, zone_sz_);
-    assert(0 == ret);
+    assert(0 == posix_memalign((void **)&gc_buffer_, block_sz_, zone_sz_));
   }
 
   for (const auto item : z->file_map_) {
@@ -1162,6 +1168,18 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
     int is_empty = 0;
     WaitUntilZoneAllocateAvail();
     io_zones_mtx.lock();
+
+#ifdef ZONE_NO_GC_THREAD
+    Zone *finish_victim = nullptr;
+    for (auto z : io_zones) {
+      bool reset_cond = (!z->IsUsed());
+      bool finish_cond =
+          (z->capacity_ < (z->max_capacity_ * finish_threshold_ / 100));
+
+      ZoneResetAndFinish(z, reset_cond, finish_cond, &finish_victim);
+    }
+#endif
+
     allocated_zone = AllocateZoneImpl(lifetime, file, &is_empty);
     if (is_empty && allocated_zone) {
 #ifdef ZONE_HOT_COLD_SEP
@@ -1178,8 +1196,9 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
         NotifyGarbageCollectionRun();
         std::this_thread::yield();
       } else {
-        Zone *selected_zone = nullptr;
+#if !defined(ZONE_NO_GC_THREAD)
         Zone *finish_victim = nullptr;
+#endif
         for (auto z : io_zones) {
           bool reset_cond = (!z->IsUsed());
           bool finish_cond =
@@ -1196,17 +1215,6 @@ Zone *ZonedBlockDevice::AllocateZone(Env::WriteLifeTimeHint lifetime,
           }
           active_io_zones_--;
         }
-
-        if (active_io_zones_.load() < max_nr_active_io_zones_) {
-          for (auto z : io_zones) {
-            if ((!z->open_for_write_) && z->IsEmpty()) {
-              selected_zone = z;
-              break;
-            }
-          }
-        }
-
-        assert(selected_zone != nullptr);
       }  // gc_thread check
     }    // is zone allocated
   } while (!allocated_zone);

@@ -367,20 +367,25 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
   uint32_t wr_size, offset = 0;
   IOStatus s;
 
-  //  static std::fstream fs;
-  //  if (!fs.is_open()) {
-  //    fs.open("gab.txt", std::fstream::out);
-  //  }
-  //
+#ifdef ZONE_TIME_CHECK
+  static std::fstream fs;
+  if (!fs.is_open()) {
+    fs.open("gab.txt", std::fstream::out);
+  }
+#endif
+
   if (active_zone_ == NULL) {
-    //    auto start = std::chrono::system_clock::now();
+#ifdef ZONE_TIME_CHECK
+    auto start = std::chrono::system_clock::now();
+#endif
     active_zone_ = zbd_->AllocateZone(lifetime_, this, NULL);
-    //    auto end = std::chrono::system_clock::now();
-    //    fs << "new\t"
-    //       << std::chrono::duration_cast<std::chrono::microseconds>(end -
-    //       start)
-    //              .count()
-    //       << "\tus" << std::endl;
+#ifdef ZONE_TIME_CHECK
+    auto end = std::chrono::system_clock::now();
+    fs << "new\t"
+       << std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+              .count()
+       << "\tus" << std::endl;
+#endif
     if (!active_zone_) {
       return IOStatus::NoSpace("Zone allocation failure\n");
     }
@@ -397,14 +402,17 @@ IOStatus ZoneFile::Append(void* data, int data_size, int valid_size) {
       PushExtent();
 
       active_zone_->CloseWR();
-      //      auto start = std::chrono::system_clock::now();
+#ifdef ZONE_TIME_CHECK
+      auto start = std::chrono::system_clock::now();
+#endif
       active_zone_ = zbd_->AllocateZone(lifetime_, this, active_zone_);
-      //      auto end = std::chrono::system_clock::now();
-      //      fs << "exh\t"
-      //         << std::chrono::duration_cast<std::chrono::microseconds>(end -
-      //         start)
-      //                .count()
-      //         << "\tus" << std::endl;
+#ifdef ZONE_TIME_CHECK
+      auto end = std::chrono::system_clock::now();
+      fs << "exh\t"
+         << std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+                .count()
+         << "\tus" << std::endl;
+#endif
       if (!active_zone_) {
         return IOStatus::NoSpace("Zone allocation failure\n");
       }
